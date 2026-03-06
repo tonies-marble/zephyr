@@ -20,6 +20,8 @@
 
 LOG_MODULE_REGISTER(soc_power, CONFIG_SOC_LOG_LEVEL);
 
+#define XTAL_NODE       DT_NODELABEL(xtal)
+#define LPM_GPC_IMR_NUM (sizeof(GPC->IMR) / sizeof(GPC->IMR[0]))
 
 static struct clock_callbacks lpm_clock_hooks;
 
@@ -65,15 +67,81 @@ static void lpm_set_sleep_mode_config(clock_mode_t mode)
 	 */
 	/* Set clock control module to transfer system to idle mode */
 	clpcr |= CCM_CLPCR_LPM(mode) | CCM_CLPCR_MASK_SCU_IDLE_MASK |
-		     CCM_CLPCR_MASK_L2CC_IDLE_MASK |
-		     CCM_CLPCR_STBY_COUNT_MASK |
-		     CCM_CLPCR_ARM_CLK_DIS_ON_LPM_MASK;
+		 CCM_CLPCR_MASK_L2CC_IDLE_MASK | CCM_CLPCR_STBY_COUNT_MASK |
+		 CCM_CLPCR_ARM_CLK_DIS_ON_LPM_MASK;
 #ifndef CONFIG_SOC_MIMXRT1011
 	/* RT1011 does not include handshake bits */
 	clpcr |= CCM_CLPCR_BYPASS_LPM_HS0_MASK | CCM_CLPCR_BYPASS_LPM_HS1_MASK;
 #endif
+	if (mode == kCLOCK_ModeStop) {
+		clpcr |= CCM_CLPCR_VSTBY_MASK | CCM_CLPCR_SBYOS_MASK;
+	}
 	CCM->CLPCR = clpcr;
 	GPC_DisableIRQ(GPC, GPR_IRQ_IRQn);
+}
+
+static void lpm_set_standby_config(void)
+{
+	uint32_t i;
+	uint32_t gpcIMR[LPM_GPC_IMR_NUM];
+	uint32_t gpcIMR5;
+
+	/* Connect internal the load resistor */
+	DCDC->REG1 |= DCDC_REG1_REG_RLOAD_SW_MASK;
+
+	/* Turn off FlexRAM0 */
+	GPC->CNTR |= GPC_CNTR_PDRAM0_PGE_MASK;
+	/* Turn off FlexRAM1 */
+	PGC->MEGA_CTRL |= PGC_MEGA_CTRL_PCR_MASK;
+
+	/* Clean data cache to make sure context is saved into RAM */
+	SCB_CleanDCache();
+
+	/* Adjust LP voltage to 0.925V */
+	DCDC_AdjustTargetVoltage(DCDC, 0x13, 0x1);
+	/* Switch DCDC to use DCDC internal OSC */
+	DCDC_SetClockSource(DCDC, kDCDC_ClockInternalOsc);
+
+	/* Power down CPU when requested */
+	PGC->CPU_CTRL = PGC_CPU_CTRL_PCR_MASK;
+
+	/* STOP_MODE config, turn off all analog except RTC in stop mode */
+	PMU->MISC0_CLR = PMU_MISC0_STOP_MODE_CONFIG_MASK;
+
+	/* Mask all GPC interrupts before enabling the RBC counters to
+	 * avoid the counter starting too early if an interupt is already
+	 * pending.
+	 */
+	for (i = 0; i < LPM_GPC_IMR_NUM; i++) {
+		gpcIMR[i] = GPC->IMR[i];
+		GPC->IMR[i] = 0xFFFFFFFFU;
+	}
+	gpcIMR5 = GPC->IMR5;
+	GPC->IMR5 = 0xFFFFFFFFU;
+
+	/*
+	 * ERR006223: CCM: Failure to resuem from wait/stop mode with power gating
+	 *   Configure REG_BYPASS_COUNTER to 2
+	 *   Enable the RBC bypass counter here to hold off the interrupts. RBC counter
+	 *  needs to be no less than 2.
+	 */
+	CCM->CCR = (CCM->CCR & ~CCM_CCR_REG_BYPASS_COUNT_MASK) | CCM_CCR_REG_BYPASS_COUNT(2);
+	CCM->CCR |= (CCM_CCR_OSCNT(0xAF) | CCM_CCR_COSC_EN_MASK | CCM_CCR_RBC_EN_MASK);
+
+	/* Now delay for a short while (3usec) at this point
+	 * so a short loop should be enough. This delay is required to ensure that
+	 * the RBC counter can start counting in case an interrupt is already pending
+	 * or in case an interrupt arrives just as ARM is about to assert DSM_request.
+	 */
+	SDK_DelayAtLeastUs(3, SDK_DEVICE_MAXIMUM_CPU_CLOCK_FREQUENCY);
+
+	/* Recover all the GPC interrupts. */
+	for (i = 0; i < LPM_GPC_IMR_NUM; i++) {
+		GPC->IMR[i] = gpcIMR[i];
+	}
+	GPC->IMR5 = gpcIMR5;
+
+	// lpm_periph_stop();
 }
 
 static void lpm_enter_soft_off_mode(void)
@@ -108,13 +176,21 @@ static void lpm_enter_sleep_mode(clock_mode_t mode)
 		/* Set the SLEEPDEEP bit to enable deep sleep mode (STOP) */
 		SCB->SCR |= SCB_SCR_SLEEPDEEP_Msk;
 	}
+
+	/* Set Doze bits */
+	// IOMUXC_GPR->GPR8 = 0xaaaaaaaa;
+	// IOMUXC_GPR->GPR12 = 0x0000000a;
+
 	/* WFI instruction will start entry into WAIT/STOP mode */
 	__WFI();
-
 }
 
 static void lpm_set_run_mode_config(void)
 {
+	/* Clear Doze bits */
+	// IOMUXC_GPR->GPR8 = 0;
+	// IOMUXC_GPR->GPR12 = 0;
+
 	/* Clear GPC wakeup source */
 	GPC_DisableIRQ(GPC, DT_IRQN(DT_INST(0, nxp_gpt_hw_timer)));
 	CCM->CLPCR &= ~(CCM_CLPCR_LPM_MASK | CCM_CLPCR_ARM_CLK_DIS_ON_LPM_MASK);
@@ -128,7 +204,6 @@ static void bandgap_set(bool on)
 		PMU->MISC0_CLR = PMU_MISC0_REFTOP_PWD_MASK;
 		/* Wait for it to stabilize */
 		while ((PMU->MISC0 & PMU_MISC0_REFTOP_VBGUP_MASK) == 0) {
-
 		}
 		/* Disable low power bandgap */
 		XTALOSC24M->LOWPWR_CTRL_CLR = XTALOSC24M_LOWPWR_CTRL_LPBG_SEL_MASK;
@@ -142,11 +217,13 @@ static void bandgap_set(bool on)
 /* Should only be used if core clocks have been reduced- drops SOC voltage */
 static void lpm_drop_voltage(void)
 {
-	/* Move to the internal RC oscillator, since we are using low power clocks */
+	/* Enable internal RC oscillator, since we are using low power clocks */
 	CLOCK_InitRcOsc24M();
 	/* Switch to internal RC oscillator */
 	CLOCK_SwitchOsc(kCLOCK_RcOsc);
+	/* Disable external OSC */
 	CLOCK_DeinitExternalClk();
+	CLOCK_SetXtal0Freq(0);
 	/*
 	 * Change to low power SOC voltage. If you are experiencing issues with
 	 * low power mode stability, try raising this voltage value.
@@ -175,12 +252,14 @@ static void lpm_raise_voltage(void)
 	PMU_1P1EnableWeakRegulator(PMU, false);
 	/* Change to normal SOC voltage */
 	DCDC_AdjustRunTargetVoltage(DCDC, (CONFIG_DCDC_TARGET_NORMAL_VOLTAGE - 800) / 25);
-	/* Move to the external RC oscillator */
+	/* Enable external OSC */
 	CLOCK_InitExternalClk(0);
+	CLOCK_SetXtal0Freq(DT_PROP(XTAL_NODE, clock_frequency));
 	/* Switch clock source to external OSC. */
 	CLOCK_SwitchOsc(kCLOCK_XtalOsc);
-}
 
+	CLOCK_DeinitRcOsc24M();
+}
 
 /* Sets device into low power mode */
 void pm_state_set(enum pm_state state, uint8_t substate_id)
@@ -202,6 +281,18 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 		}
 		lpm_set_sleep_mode_config(kCLOCK_ModeWait);
 		lpm_enter_sleep_mode(kCLOCK_ModeWait);
+		break;
+	case PM_STATE_STANDBY:
+		LOG_DBG("entering PM state standby");
+		if (lpm_clock_hooks.clock_set_low_power) {
+			/* Drop the SOC clocks to low power mode, and decrease core voltage */
+			lpm_clock_hooks.clock_set_low_power();
+			lpm_drop_voltage();
+		}
+		DCDC_SetClockSource(DCDC, kDCDC_ClockInternalOsc);
+		lpm_set_sleep_mode_config(kCLOCK_ModeStop);
+		lpm_set_standby_config();
+		lpm_enter_sleep_mode(kCLOCK_ModeStop);
 		break;
 	case PM_STATE_SOFT_OFF:
 		LOG_DBG("Entering PM state soft off");
@@ -244,7 +335,6 @@ void rt10xx_power_init(void)
 {
 	dcdc_internal_regulator_config_t reg_config;
 
-
 	/* Ensure clocks to ARM core memory will not be gated in low power mode
 	 * if interrupt is pending
 	 */
@@ -257,6 +347,12 @@ void rt10xx_power_init(void)
 	/* Errata ERR050143 */
 	IOMUXC_GPR->GPR1 |= IOMUXC_GPR_GPR1_GINT_MASK;
 
+	/* Initialize GPC to mask all IRQs */
+	for (int i = 0; i < (sizeof(GPC->IMR) / sizeof(GPC->IMR[0])); i++) {
+		GPC->IMR[i] = 0xFFFFFFFFU;
+	}
+	GPC->IMR5 = 0xFFFFFFFFU;
+
 	/* Configure DCDC */
 	DCDC_BootIntoDCM(DCDC);
 	/* Set target voltage for low power mode to 0.925V*/
@@ -265,7 +361,10 @@ void rt10xx_power_init(void)
 	reg_config.enableLoadResistor = false;
 	reg_config.feedbackPoint = 0x1; /* 1.0V with 1.3V reference voltage */
 	DCDC_SetInternalRegulatorConfig(DCDC, &reg_config);
+	DCDC_SetClockSource(DCDC, kDCDC_ClockExternalOsc);
 
 	/* Enable high gate drive on power FETs to reduce leakage current */
 	PMU_CoreEnableIncreaseGateDrive(PMU, true);
+	// /* Connect vdd_high_in and connect vdd_snvs_in */
+	// PMU->MISC0_CLR = PMU_MISC0_DISCON_HIGH_SNVS_MASK;
 }
