@@ -1,0 +1,422 @@
+/*
+ * Copyright (c) 2024 Realtek Semiconductor Corp.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <mem.h>
+#include <freq.h>
+#include <arm/armv8.1-m.dtsi>
+#include <zephyr/dt-bindings/clock/amebasmart_clock.h>
+#include <zephyr/dt-bindings/dma/ameba_dma.h>
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/i2c/i2c.h>
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
+
+/*
+ * Skeleton devicetree for the Realtek AmebaSmart (RTL8730E) HP core (Cortex-M55,
+ * "KM4"). Zephyr targets only the HP core; the LP (M0) and AP (A32) cores are
+ * assumed to be brought up by pre-built firmware blobs, which are also
+ * responsible for DDR PHY + controller initialisation before handing control
+ * to image2. Zephyr therefore treats DRAM as pre-initialised memory and uses
+ * it as its main RAM region.
+ *
+ * IRQ numbers below are from the KM4/HP vector table in
+ * ameba-rtos/component/soc/amebasmart/fwlib/include/ameba_vector_table.h.
+ */
+
+/ {
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu0: cpu@0 {
+			device_type = "cpu";
+			compatible = "arm,cortex-m55";
+			reg = <0>;
+			d-cache-line-size = <32>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+		};
+	};
+
+	clocks {
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		clk_sys: clk_sys {
+			#clock-cells = <0>;
+			compatible = "fixed-clock";
+			clock-frequency = <DT_FREQ_M(200)>;
+		};
+
+		rcc: rcc@42008000 {
+			compatible = "realtek,ameba-rcc";
+			#clock-cells = <1>;
+			reg = <0x42008000 0x400>;
+		};
+	};
+
+	soc {
+		/*
+		 * KM4 main DRAM (KM4_BD_DRAM, per ameba_layout.ld, CONFIG_IMG2_FLASH
+		 * branch): 384 KiB at 0x60000020. External PSRAM/DDR (RTL8730E
+		 * supports either — the bootloader picks one). The 32-byte header
+		 * at 0x60000000 belongs to the DRAM subimage.
+		 *
+		 * The bootloader hardcodes `__image2_entry_func__` to the start
+		 * of this region (0x60000020) and dereferences it as a
+		 * `RAM_START_FUNCTION` struct to find our entry point. Zephyr's
+		 * boot_section.ld places `.ram_image2.entry` at the very start
+		 * of RAMABLE_REGION (i.e. this sram0), so the struct ends up at
+		 * exactly 0x60000020 — provided the DRAM subimage that we ship
+		 * to the bootloader has its `image_addr` set to _image_ram_start
+		 * and carries `.ram_image2.entry` in its payload.
+		 */
+		sram0: memory@60000020 {
+			compatible = "mmio-sram";
+			reg = <0x60000020 0x0005ffe0>;
+		};
+
+		/*
+		 * KM4 non-secure on-die SRAM (KM4_BD_RAM), 28 KiB. Kept as a
+		 * secondary region for latency-sensitive placements.
+		 */
+		sram1: memory@20014020 {
+			compatible = "mmio-sram";
+			reg = <0x20014020 0x00006fe0>;
+		};
+
+		/* HP-visible Wi-Fi MAC region */
+		wifi0: wifi@40000000 {
+			compatible = "realtek,ameba-wifi";
+			reg = <0x40000000 0x40000>;
+			status = "disabled";
+		};
+
+		/* GDMA0 (HP domain) */
+		dma: dma@400e0000 {
+			compatible = "realtek,ameba-gdma";
+			reg = <0x400e0000 0x8000>;
+			clocks = <&rcc AMEBA_DMAC_CLK>;
+			interrupts = <25 0>, <26 0>, <27 0>, <28 0>,
+				     <29 0>, <30 0>, <31 0>, <32 0>;
+			interrupt-names = "CH0", "CH1", "CH2", "CH3",
+					  "CH4", "CH5", "CH6", "CH7";
+			#dma-cells = <3>;
+			dma-channels = <8>;
+			dma-buf-addr-alignment = <32>;
+			dma-buf-size-alignment = <32>;
+			status = "disabled";
+		};
+
+		/* SPI0 / SPI1 (HP domain) */
+		spi0: spi@400e8000 {
+			compatible = "realtek,ameba-spi";
+			reg = <0x400e8000 0x1000>;
+			interrupts = <40 0>;
+			clocks = <&rcc AMEBA_SPI0_CLK>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		spi1: spi@400e9000 {
+			compatible = "realtek,ameba-spi";
+			reg = <0x400e9000 0x1000>;
+			interrupts = <41 0>;
+			clocks = <&rcc AMEBA_SPI1_CLK>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		/* SPI flash controller (SPIC / XIP window is at 0x0A000000 / 0x0D000000) */
+		spic: flash-controller@44000000 {
+			compatible = "realtek,ameba-flash-controller";
+			reg = <0x44000000 0x400>;
+			ranges;
+
+			#address-cells = <1>;
+			#size-cells = <1>;
+			status = "disabled";
+
+			flash0: flash@d000020 {
+				compatible = "soc-nv-flash";
+				erase-block-size = <DT_SIZE_K(4)>;
+				write-block-size = <4>;
+				#address-cells = <1>;
+				#size-cells = <1>;
+			};
+		};
+
+		/* TRNG lives in HP APB */
+		trng: trng@41009000 {
+			compatible = "realtek,ameba-trng";
+			reg = <0x41009000 0x1000>;
+			clocks = <&rcc AMEBA_TRNG_CLK>;
+			status = "disabled";
+		};
+
+		/* Pinmux registers */
+		pinctrl: pinctrl@42008a00 {
+			compatible = "realtek,ameba-pinctrl";
+			reg = <0x42008a00 0x200>;
+			status = "disabled";
+		};
+
+		/* RTC (LP domain, but visible from HP) */
+		rtc: rtc@4200e000 {
+			compatible = "realtek,ameba-rtc";
+			reg = <0x4200e000 0x30>;
+			clocks = <&rcc AMEBA_RTC_CLK>;
+			interrupts = <12 0>;
+			alarms-count = <1>;
+			status = "disabled";
+		};
+
+		/* HP-side watchdogs. Multiple instances (WDG1..WDG4) exist upstream;
+		 * only WDG1 is exposed here as a starting point.
+		 */
+		wdg: watchdog@51000400 {
+			compatible = "realtek,ameba-watchdog";
+			reg = <0x51000400 0x40>;
+			interrupts = <59 0>;
+			early-int-cnt-ms = <500>;
+			status = "disabled";
+		};
+
+		/* LP loguart (KM0 log UART) */
+		loguart: serial@4200c000 {
+			compatible = "realtek,ameba-loguart";
+			reg = <0x4200c000 0x1000>;
+			clocks = <&rcc AMEBA_LOGUART_CLK>;
+			interrupts = <8 0>;
+			current-speed = <1500000>;
+			status = "disabled";
+		};
+
+		/* HP-side UART0..UART2 (UART3 is dedicated to BT) */
+		uart0: serial@41004000 {
+			compatible = "realtek,ameba-uart";
+			reg = <0x41004000 0x1000>;
+			clocks = <&rcc AMEBA_UART0_CLK>;
+			interrupts = <50 0>;
+			current-speed = <115200>;
+			status = "disabled";
+		};
+
+		uart1: serial@41005000 {
+			compatible = "realtek,ameba-uart";
+			reg = <0x41005000 0x1000>;
+			clocks = <&rcc AMEBA_UART1_CLK>;
+			interrupts = <51 0>;
+			current-speed = <115200>;
+			status = "disabled";
+		};
+
+		uart2: serial@41006000 {
+			compatible = "realtek,ameba-uart";
+			reg = <0x41006000 0x1000>;
+			clocks = <&rcc AMEBA_UART2_CLK>;
+			interrupts = <52 0>;
+			current-speed = <115200>;
+			status = "disabled";
+		};
+
+		/* GPIO banks (LP-domain, but visible from HP) */
+		gpioa: gpio@4200d000 {
+			compatible = "realtek,ameba-gpio";
+			reg = <0x4200d000 0x400>;
+			gpio-controller;
+			#gpio-cells = <2>;
+			interrupts = <9 0>;
+			status = "disabled";
+		};
+
+		gpiob: gpio@4200d400 {
+			compatible = "realtek,ameba-gpio";
+			reg = <0x4200d400 0x400>;
+			gpio-controller;
+			#gpio-cells = <2>;
+			interrupts = <10 0>;
+			status = "disabled";
+		};
+
+		gpioc: gpio@4200d800 {
+			compatible = "realtek,ameba-gpio";
+			reg = <0x4200d800 0x400>;
+			gpio-controller;
+			#gpio-cells = <2>;
+			interrupts = <11 0>;
+			status = "disabled";
+		};
+
+		/* ADC (LP domain) */
+		adc: adc@42012000 {
+			compatible = "realtek,ameba-adc";
+			reg = <0x42012000 0xb8>;
+			clocks = <&rcc AMEBA_ADC_CLK>;
+			interrupts = <14 0>;
+			channel-count = <7>;
+			#io-channel-cells = <1>;
+			status = "disabled";
+		};
+
+		/* LP timers 0..7 (32.768 kHz) */
+		timer0: counter@4200b000 {
+			compatible = "realtek,ameba-counter";
+			reg = <0x4200b000 0x30>;
+			clocks = <&rcc AMEBA_LTIM0_CLK>;
+			interrupts = <0 0>;
+			clock-frequency = <32768>;
+			status = "disabled";
+		};
+
+		timer1: counter@4200b200 {
+			compatible = "realtek,ameba-counter";
+			reg = <0x4200b200 0x30>;
+			clocks = <&rcc AMEBA_LTIM1_CLK>;
+			interrupts = <1 0>;
+			clock-frequency = <32768>;
+			status = "disabled";
+		};
+
+		timer2: counter@4200b400 {
+			compatible = "realtek,ameba-counter";
+			reg = <0x4200b400 0x30>;
+			clocks = <&rcc AMEBA_LTIM2_CLK>;
+			interrupts = <2 0>;
+			clock-frequency = <32768>;
+			status = "disabled";
+		};
+
+		timer3: counter@4200b600 {
+			compatible = "realtek,ameba-counter";
+			reg = <0x4200b600 0x30>;
+			clocks = <&rcc AMEBA_LTIM3_CLK>;
+			interrupts = <3 0>;
+			clock-frequency = <32768>;
+			status = "disabled";
+		};
+
+		timer4: counter@4200b800 {
+			compatible = "realtek,ameba-counter";
+			reg = <0x4200b800 0x30>;
+			clocks = <&rcc AMEBA_LTIM4_CLK>;
+			interrupts = <4 0>;
+			clock-frequency = <32768>;
+			status = "disabled";
+		};
+
+		timer5: counter@4200ba00 {
+			compatible = "realtek,ameba-counter";
+			reg = <0x4200ba00 0x30>;
+			clocks = <&rcc AMEBA_LTIM5_CLK>;
+			interrupts = <5 0>;
+			clock-frequency = <32768>;
+			status = "disabled";
+		};
+
+		timer6: counter@4200bc00 {
+			compatible = "realtek,ameba-counter";
+			reg = <0x4200bc00 0x30>;
+			clocks = <&rcc AMEBA_LTIM6_CLK>;
+			interrupts = <6 0>;
+			clock-frequency = <32768>;
+			status = "disabled";
+		};
+
+		timer7: counter@4200be00 {
+			compatible = "realtek,ameba-counter";
+			reg = <0x4200be00 0x30>;
+			clocks = <&rcc AMEBA_LTIM7_CLK>;
+			interrupts = <7 0>;
+			clock-frequency = <32768>;
+			status = "disabled";
+		};
+
+		/* HP timers TIMER8..TIMER9 support PWM / input capture (1 MHz).
+		 * TIMER10..TIMER13 are additional HP timers.
+		 */
+		pwm0: pwm@4100a000 {
+			compatible = "realtek,ameba-pwm";
+			reg = <0x4100a000 0x88>;
+			interrupts = <57 0>;
+			channel-count = <8>;
+			index = <0>;
+			clocks = <&rcc AMEBA_PWM0_CLK>;
+			prescale = <39>;
+			#pwm-cells = <3>;
+			status = "disabled";
+		};
+
+		timer10: counter@4100a400 {
+			compatible = "realtek,ameba-counter";
+			reg = <0x4100a400 0x30>;
+			clocks = <&rcc AMEBA_HTIM0_CLK>;
+			interrupts = <75 0>;
+			clock-frequency = <DT_FREQ_M(1)>;
+			status = "disabled";
+		};
+
+		timer11: counter@4100a600 {
+			compatible = "realtek,ameba-counter";
+			reg = <0x4100a600 0x30>;
+			clocks = <&rcc AMEBA_HTIM1_CLK>;
+			interrupts = <76 0>;
+			clock-frequency = <DT_FREQ_M(1)>;
+			status = "disabled";
+		};
+
+		/* I2C0 lives in LP domain, I2C1 / I2C2 in HP domain */
+		i2c0: i2c@4200f000 {
+			compatible = "realtek,ameba-i2c";
+			reg = <0x4200f000 0x1000>;
+			interrupts = <22 0>;
+			clocks = <&rcc AMEBA_I2C0_CLK>;
+			clock-frequency = <I2C_BITRATE_STANDARD>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		i2c1: i2c@400ef000 {
+			compatible = "realtek,ameba-i2c";
+			reg = <0x400ef000 0x1000>;
+			interrupts = <55 0>;
+			clocks = <&rcc AMEBA_I2C1_CLK>;
+			clock-frequency = <I2C_BITRATE_STANDARD>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		/* SPORT0..SPORT3 (HP domain) */
+		sport0: sport@4100d000 {
+			compatible = "realtek,ameba-sport";
+			reg = <0x4100d000 0x1000>;
+			interrupts = <63 0>;
+			clocks = <&rcc AMEBA_SPORT0_CLK>;
+			status = "disabled";
+		};
+
+		sport1: sport@4100e000 {
+			compatible = "realtek,ameba-sport";
+			reg = <0x4100e000 0x1000>;
+			interrupts = <64 0>;
+			clocks = <&rcc AMEBA_SPORT1_CLK>;
+			status = "disabled";
+		};
+
+		bt: bt {
+			compatible = "realtek,ameba-bt-hci";
+			status = "disabled";
+		};
+	};
+};
+
+&nvic {
+	arm,num-irq-priority-bits = <3>;
+};

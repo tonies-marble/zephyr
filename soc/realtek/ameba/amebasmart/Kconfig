@@ -1,0 +1,38 @@
+# Copyright (c) 2024 Realtek Semiconductor Corp.
+# SPDX-License-Identifier: Apache-2.0
+
+# The AmebaSmart series covers a single SoC (RTL8730E) but ships two
+# Zephyr-targetable cores: the HP (Cortex-M55) and the AP (Cortex-A32).
+# The core selection is done via SOC_RTL8730E_HP / SOC_RTL8730E_AP in
+# Kconfig.soc.
+
+config SOC_SERIES_AMEBASMART
+	select CLOCK_CONTROL
+
+config SOC_RTL8730E_HP
+	select ARM
+	select CPU_CORTEX_M55
+	select CPU_HAS_DCACHE
+	select CPU_HAS_ICACHE
+	select CPU_HAS_ARM_SAU
+	select CPU_HAS_FPU
+	select CPU_HAS_VFP
+	select ARMV8_M_DSP
+	select CPU_HAS_ARM_MPU
+	select ARM_MPU
+	# Cortex-M55 always implements the Security Extension, and the KM4
+	# bootloader (BOOT_NsStart in bootloader_hp.c) transitions to the
+	# Non-Secure world before jumping to our image2. Zephyr therefore
+	# runs Non-Secure and its exception exit path must emit the
+	# NS-return EXC_RETURN encoding — see TRUSTED_EXECUTION_NONSECURE
+	# in Kconfig.defconfig.rtl8730e.hp.
+	select ARM_TRUSTZONE_M
+	# Idle hook wired for future power-management work.
+	select ARM_ON_ENTER_CPU_IDLE_HOOK
+
+config SOC_RTL8730E_AP
+	select ARM
+	select CPU_CORTEX_A32
+	select CPU_HAS_DCACHE
+	select CPU_HAS_ICACHE
+	select CPU_HAS_FPU

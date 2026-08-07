@@ -1,0 +1,6 @@
+# Copyright (c) 2024 Realtek Semiconductor Corp.
+# SPDX-License-Identifier: Apache-2.0
+
+# Placeholder defconfig for the AP (Cortex-A32) variant of rtl8730e_evb.
+# Zephyr on the AP is not functional yet; this build target exists so the
+# port shape mirrors imx93 (see soc/realtek/ameba/amebasmart/ap/soc.c).

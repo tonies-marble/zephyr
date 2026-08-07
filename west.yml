@@ -23,6 +23,8 @@ manifest:
       url-base: https://github.com/zephyrproject-rtos
     - name: babblesim
       url-base: https://github.com/BabbleSim
+    - name: tonies-marble
+      url-base: https://github.com/tonies-marble
 
   group-filter: [-babblesim, -optional, -testing]
 
@@ -228,8 +230,9 @@ manifest:
       groups:
         - hal
     - name: hal_realtek
+      remote: tonies-marble
       path: modules/hal/realtek
-      revision: c20e7ee9744a1b9b5f05b99260930a7f196b9b12
+      revision: b03e82da29dcd7dd4868a66411f7de6b2a1fef05
       groups:
         - hal
     - name: hal_renesas

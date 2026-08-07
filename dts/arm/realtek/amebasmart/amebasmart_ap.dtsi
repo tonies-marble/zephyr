@@ -1,0 +1,51 @@
+/*
+ * Copyright (c) 2024 Realtek Semiconductor Corp.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
+ * Skeleton devicetree for the Realtek AmebaSmart (RTL8730E) AP core
+ * (Cortex-A32, "CA32"). Zephyr on the AP is not yet functional — this
+ * file exists so that a rtl8730e_evb/rtl8730e/ap build can select the
+ * intended toolchain and reach the linker. Peripheral, GIC, and clock
+ * bring-up will be added as the AP variant is developed.
+ */
+
+#include <mem.h>
+#include <freq.h>
+#include <arm/armv8-a.dtsi>
+#include <zephyr/dt-bindings/interrupt-controller/arm-gic.h>
+
+/ {
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu0: cpu@0 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a32";
+			reg = <0>;
+		};
+	};
+
+	clocks {
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		clk_sys: clk_sys {
+			#clock-cells = <0>;
+			compatible = "fixed-clock";
+			/* AP core runs at 920 MHz (bootloader-reported). */
+			clock-frequency = <DT_FREQ_M(920)>;
+		};
+	};
+
+	soc {
+		/*
+		 * CA32 XIP window is at 0x0e000000 in the flash-virtual map
+		 * used by the KM4 bootloader. When Zephyr becomes bootable on
+		 * the AP, this will need matching partitions + RSIP setup.
+		 */
+	};
+};

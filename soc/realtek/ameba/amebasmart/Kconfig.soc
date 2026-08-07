@@ -1,0 +1,34 @@
+# Copyright (c) 2024 Realtek Semiconductor Corp.
+# SPDX-License-Identifier: Apache-2.0
+
+config SOC_SERIES_AMEBASMART
+	bool
+	select SOC_FAMILY_REALTEK_AMEBA
+
+config SOC_SERIES
+	default "amebasmart" if SOC_SERIES_AMEBASMART
+
+config SOC_RTL8730E
+	bool
+	select SOC_SERIES_AMEBASMART
+
+# The RTL8730E is a heterogeneous tri-core SoC. Zephyr can be built for
+# either the HP core (Cortex-M55, "KM4") or the AP core (Cortex-A32,
+# "CA32"). The LP core (Cortex-M0, "KM0") stays as a prebuilt nuwa_lib
+# blob and is not a Zephyr target. The cluster is selected via the board
+# qualifier (rtl8730e/hp vs rtl8730e/ap).
+
+config SOC_RTL8730E_HP
+	bool
+	select SOC_RTL8730E
+	help
+	  Build for the Cortex-M55 High-Performance core ("KM4").
+
+config SOC_RTL8730E_AP
+	bool
+	select SOC_RTL8730E
+	help
+	  Build for the Cortex-A32 Application Processor core ("CA32").
+
+config SOC
+	default "rtl8730e" if SOC_RTL8730E

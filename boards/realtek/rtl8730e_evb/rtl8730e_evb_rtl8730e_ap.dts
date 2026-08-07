@@ -1,0 +1,17 @@
+/*
+ * Copyright (c) 2024 Realtek Semiconductor Corp.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/dts-v1/;
+
+#include <realtek/amebasmart/amebasmart_ap.dtsi>
+
+/ {
+	model = "RealTek AmebaSmart RTL8730E EVB (AP core)";
+	compatible = "realtek,rtl8730e_evb";
+
+	chosen {
+	};
+};

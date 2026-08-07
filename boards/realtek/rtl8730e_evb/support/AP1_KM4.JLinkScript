@@ -1,0 +1,26 @@
+/*
+ * Copyright (c) 2024 Realtek Semiconductor Corp.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * J-Link script for the RTL8730E KM4 (Cortex-M55, HP core).
+ *
+ * AP mapping matches Realtek's own ameba_jlink_config.json5:
+ *   AP 0 -> KM0 (LP)
+ *   AP 1 -> KM4 (HP)   <- Zephyr target
+ *   AP 2 -> reserved
+ *   AP 3 -> CA32 (AP)  (APB-AP)
+ */
+
+void InitTarget(void) {
+  CORESIGHT_AddAP(0, CORESIGHT_AHB_AP);
+  CORESIGHT_AddAP(1, CORESIGHT_AHB_AP);
+  CORESIGHT_AddAP(2, CORESIGHT_AHB_AP);
+  CORESIGHT_AddAP(3, CORESIGHT_APB_AP);
+
+  CORESIGHT_IndexAHBAPToUse = 1;
+  JTAG_WriteClocks(1); /* Make sure that JTAG buffers are empty */
+  JTAG_Speed = 1000;
+
+  JLINK_MemRegion("0xEFFF0000-0xFFFFFFFF X");
+}

@@ -1,0 +1,15 @@
+# Copyright (c) 2024 Realtek Semiconductor Corp.
+# SPDX-License-Identifier: Apache-2.0
+
+if SOC_RTL8730E_AP
+
+# CA32 core: same 96 vectored KM4 IRQ range does not apply here (the AP
+# uses a GIC), so pick a placeholder that a real GIC-based port can
+# override. Keep the shape of the port until AP bring-up work lands.
+config NUM_IRQS
+	default 128
+
+config SYS_CLOCK_HW_CYCLES_PER_SEC
+	default $(dt_node_int_prop_int,/clocks/clk_sys,clock-frequency)
+
+endif # SOC_RTL8730E_AP

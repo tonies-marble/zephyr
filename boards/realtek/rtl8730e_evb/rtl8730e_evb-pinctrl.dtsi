@@ -1,0 +1,20 @@
+/*
+ * Copyright (c) 2024 Realtek Semiconductor Corp.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/dt-bindings/pinctrl/amebasmart-pinctrl.h>
+
+&pinctrl {
+	compatible = "realtek,ameba-pinctrl";
+
+	/* Log UART: RX on PB23, TX on PB24 (RTL8730E EVB) */
+	loguart_default: loguart_default {
+		group1 {
+			pinmux = <AMEBA_PINMUX('B', 23, AMEBA_LOG_UART)>,       /* RXD */
+				 <AMEBA_PINMUX('B', 24, AMEBA_LOG_UART)>;       /* TXD */
+			bias-pull-up;
+		};
+	};
+};

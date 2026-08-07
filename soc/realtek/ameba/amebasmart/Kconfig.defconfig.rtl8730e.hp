@@ -1,0 +1,27 @@
+# Copyright (c) 2024 Realtek Semiconductor Corp.
+# SPDX-License-Identifier: Apache-2.0
+
+if SOC_RTL8730E_HP
+
+config NUM_IRQS
+	default 96
+
+config SYS_CLOCK_HW_CYCLES_PER_SEC
+	default $(dt_node_int_prop_int,/clocks/clk_sys,clock-frequency)
+
+config CACHE_MANAGEMENT
+	default y
+
+# The KM4 bootloader (BOOT_NsStart in bootloader_hp.c) transitions
+# execution to Non-Secure state before jumping to our image2 — a JLink
+# trace of PendSV shows LR=0xFFFFFFBC (bit 0 = ES = 0 = from NS) on
+# entry. Zephyr must therefore be built as an ARMv8-M non-secure image
+# so its per-thread EXC_RETURN default (DEFAULT_EXC_RETURN in
+# arch/arm/core/cortex_m/thread.c) becomes 0xBC — matching the state
+# the CPU is actually in. With TRUSTED_EXECUTION_SECURE (the previous
+# guess), Zephyr defaults to 0xFD and the first exception return
+# thereafter trips SFSR.INVER.
+config TRUSTED_EXECUTION_NONSECURE
+	default y
+
+endif # SOC_RTL8730E_HP
