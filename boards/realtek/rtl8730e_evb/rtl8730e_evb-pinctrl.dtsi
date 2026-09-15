@@ -84,6 +84,21 @@
 		};
 	};
 
+	/* LEDC serial output on PA9 (drives WS2812-style RGB LED chain) */
+	ledc_default: ledc_default {
+		group1 {
+			pinmux = <AMEBA_PINMUX('A', 9, AMEBA_LEDC)>;
+			bias-pull-up;
+		};
+	};
+
+	pwm0_default: pwm0_default {
+		group1 {
+			pinmux = <AMEBA_PINMUX('A', 7, AMEBA_PWM)>; /* Channel 0 Output Pin */
+			bias-pull-up;
+		};
+	};
+
 	/*
 	 * ADC external channels CH0-CH5 map to dedicated analog pads PA0-PA5.
 	 * The ADC shares its analog front-end with captouch, so the pad uses the

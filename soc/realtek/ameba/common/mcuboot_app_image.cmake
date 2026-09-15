@@ -10,8 +10,13 @@ get_target_property(ameba_soc_name zephyr_property_target ameba_soc_name)
 get_target_property(origin_secondary_image zephyr_property_target origin_secondary_image)
 get_target_property(output_prefix zephyr_property_target ameba_output_prefix)
 
+# Project dir, computed once and passed via --post-build-dir to every axf2bin.py
+# call. Without it axf2bin.py falls back to cwd (${ZEPHYR_BINARY_DIR}) and misparses
+# the SoC from the build_* dir name. (Same contract as merge_bin.py.)
+set(td ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project)
+
 function(ameba_rsip_read_manifest out_enable out_iv)
-  file(READ "${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/manifest_formatted.json" JSON_CONTENT)
+  file(READ "${td}/manifest_formatted.json" JSON_CONTENT)
   string(JSON rsip_enable GET "${JSON_CONTENT}" "image2" "rsip_enable")
   set(${out_enable} "${rsip_enable}" PARENT_SCOPE)
   if(rsip_enable)
@@ -26,10 +31,10 @@ function(zephyr_mcuboot_app_tasks_early)
   set_property(GLOBAL APPEND PROPERTY extra_post_build_commands
     COMMAND ${CMAKE_COMMAND} -E copy
         ${origin_secondary_image}
-        ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app1_origin.bin
+        ${td}/app1_origin.bin
     COMMAND ${CMAKE_COMMAND} -E copy
         ${ZEPHYR_BINARY_DIR}/${KERNEL_NAME}.bin
-        ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app0_origin.bin
+        ${td}/app0_origin.bin
   )
 
   if(rsip_enable)
@@ -43,19 +48,22 @@ function(zephyr_mcuboot_app_tasks_early)
     # app img0: primary image
     set_property(GLOBAL APPEND PROPERTY extra_post_build_commands
       COMMAND
-        ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py cut
+        ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+          --post-build-dir ${td} cut
           --input-file ${ZEPHYR_BINARY_DIR}/${KERNEL_NAME}.bin
-          --output-file ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app0_cuted.bin
+          --output-file ${td}/app0_cuted.bin
           --length ${CONFIG_ROM_START_OFFSET} # 0x200 when enable mcuboot
       COMMAND
-        ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py pad
-          --input-file ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app0_cuted.bin
+        ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+          --post-build-dir ${td} pad
+          --input-file ${td}/app0_cuted.bin
           --length 32 #NOTE: rsip require 32byte alignment
       COMMAND
-        ${CMAKE_COMMAND} -E chdir "${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/"
-        ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py rsip
-          --output-file ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app0_rsip_raw.bin
-          --input-file ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app0_cuted.bin
+        ${CMAKE_COMMAND} -E chdir "${td}/"
+        ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+          --post-build-dir ${td} rsip
+          --output-file ${td}/app0_rsip_raw.bin
+          --input-file ${td}/app0_cuted.bin
           #WARNING: Pay attention to the offset here, which MUST be consistent with MMU config based on the real code addr
           --address ${address}
           --type image2
@@ -65,12 +73,13 @@ function(zephyr_mcuboot_app_tasks_early)
     set_property(GLOBAL APPEND PROPERTY extra_post_build_commands
       COMMAND ${CMAKE_COMMAND} -E copy
           ${origin_secondary_image}
-          ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app1_cuted.bin
+          ${td}/app1_cuted.bin
       COMMAND
-        ${CMAKE_COMMAND} -E chdir "${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/"
-        ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py rsip
-          --output-file ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app1_rsip_raw.bin
-          --input-file ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app1_cuted.bin
+        ${CMAKE_COMMAND} -E chdir "${td}/"
+        ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+          --post-build-dir ${td} rsip
+          --output-file ${td}/app1_rsip_raw.bin
+          --input-file ${td}/app1_cuted.bin
           #WARNING: Pay attention to the offset here, which MUST be consistent with MMU config based on the real code addr
           --address ${secondary_logic_addr}
           --type image2
@@ -78,15 +87,17 @@ function(zephyr_mcuboot_app_tasks_early)
 
     set_property(GLOBAL APPEND PROPERTY extra_post_build_commands
       # merge two app images
-      COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py helper merge
-              --output-file ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app_rsip_raw.bin
+      COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${td} helper merge
+              --output-file ${td}/app_rsip_raw.bin
               --input-file
-                ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app1_rsip_raw.bin
-                ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app0_rsip_raw.bin
+                ${td}/app1_rsip_raw.bin
+                ${td}/app0_rsip_raw.bin
 
       # pad reserved mcuboot header to front
-      COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py pad
-              --input-file ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app_rsip_raw.bin
+      COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${td} pad
+              --input-file ${td}/app_rsip_raw.bin
               --value 0x0
               --length ${CONFIG_ROM_START_OFFSET} # 0x200 when enable mcuboot
               --from-head
@@ -96,21 +107,24 @@ function(zephyr_mcuboot_app_tasks_early)
   else() # !rsip_enable
     set_property(GLOBAL APPEND PROPERTY extra_post_build_commands
       COMMAND
-        ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py cut
+        ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+          --post-build-dir ${td} cut
           --input-file ${ZEPHYR_BINARY_DIR}/${KERNEL_NAME}.bin
-          --output-file ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app0_cuted.bin
+          --output-file ${td}/app0_cuted.bin
           --length ${CONFIG_ROM_START_OFFSET} # 0x200 when enable mcuboot
 
       # merge two app images
-      COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py helper merge
-              --output-file ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app_raw.bin
+      COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${td} helper merge
+              --output-file ${td}/app_raw.bin
               --input-file
                 ${origin_secondary_image}
-                ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app0_cuted.bin
+                ${td}/app0_cuted.bin
 
       # pad reserved mcuboot header to front
-      COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py pad
-              --input-file ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app_raw.bin
+      COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${td} pad
+              --input-file ${td}/app_raw.bin
               --value 0x0
               --length ${CONFIG_ROM_START_OFFSET} # 0x200 when enable mcuboot
               --from-head
@@ -165,8 +179,8 @@ if (CONFIG_BOOTLOADER_MCUBOOT)
 
     # ameba_layout.ld is static, so resolve its addresses at configure time.
     execute_process(
-      COMMAND ${PYTHON_EXECUTABLE}
-              ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+      COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${td}
               amebasmart_boot_assets resolve-addrs
               --layout-file ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/amebasmart/ameba_layout.ld
       OUTPUT_VARIABLE ameba_layout_addrs_raw
@@ -187,7 +201,7 @@ if (CONFIG_BOOTLOADER_MCUBOOT)
     math(EXPR ameba_km4_rsip_addr  "${ameba_layout_km4_xip} - 0x20" OUTPUT_FORMAT HEXADECIMAL)
     math(EXPR ameba_ca32_rsip_addr "${ameba_layout_xip}     - 0x20" OUTPUT_FORMAT HEXADECIMAL)
 
-    set(ameba_work_dir ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project)
+    set(ameba_work_dir ${td})
     set(ameba_tfa_img_dir ${CMAKE_BINARY_DIR}/tfa/project_ap/image)
     set(ameba_blobs_dir ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/zephyr/blobs/ameba/amebasmart/bin)
 
@@ -204,48 +218,60 @@ if (CONFIG_BOOTLOADER_MCUBOOT)
 
       # CA32: pad+header each TF-A output, concat, RSIP as one chain.
       COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${ameba_work_dir}
               pad --input-file ${ameba_tfa_img_dir}/bl1_sram.bin --length 32
               --output-file ${ameba_work_dir}/bl1_sram_pad.bin
       COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${ameba_work_dir}
               pad --input-file ${ameba_tfa_img_dir}/bl1.bin --length 32
               --output-file ${ameba_work_dir}/bl1_pad.bin
       COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${ameba_work_dir}
               pad --input-file ${ameba_tfa_img_dir}/fip.bin --length 32
               --output-file ${ameba_work_dir}/fip_pad.bin
       COMMAND ${CMAKE_COMMAND} -E touch ${ameba_work_dir}/xip_image2.bin
       COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${ameba_work_dir}
               prepend_header -o ${ameba_work_dir}/xip_image2_prepend.bin
               -i ${ameba_work_dir}/xip_image2.bin --address ${ameba_layout_xip}
       COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${ameba_work_dir}
               prepend_header -o ${ameba_work_dir}/bl1_sram_prepend.bin
               -i ${ameba_work_dir}/bl1_sram_pad.bin --address ${ameba_layout_bl1_sram}
       COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${ameba_work_dir}
               prepend_header -o ${ameba_work_dir}/bl1_prepend.bin
               -i ${ameba_work_dir}/bl1_pad.bin --address ${ameba_layout_bl1_dram}
       COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${ameba_work_dir}
               prepend_header -o ${ameba_work_dir}/fip_prepend.bin
               -i ${ameba_work_dir}/fip_pad.bin --address ${ameba_layout_fip}
       COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${ameba_work_dir}
               helper merge -o ${ameba_work_dir}/ap_image_plain.bin
               -i ${ameba_work_dir}/xip_image2_prepend.bin ${ameba_work_dir}/bl1_sram_prepend.bin
                  ${ameba_work_dir}/bl1_prepend.bin ${ameba_work_dir}/fip_prepend.bin
       COMMAND ${CMAKE_COMMAND} -E chdir "${ameba_work_dir}"
               ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${ameba_work_dir}
               rsip -i ${ameba_work_dir}/ap_image_plain.bin -o ${ameba_work_dir}/ap_image_rsip.bin
               --address ${ameba_ca32_rsip_addr} --type image2
 
       # KM0/KM4: RSIP the prebuilt blob directly at its own window base.
       COMMAND ${CMAKE_COMMAND} -E chdir "${ameba_work_dir}"
               ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${ameba_work_dir}
               rsip -i ${ameba_blobs_dir}/km0_image2_all.bin -o ${ameba_work_dir}/km0_rsip.bin
               --address ${ameba_km0_rsip_addr} --type image2
       COMMAND ${CMAKE_COMMAND} -E chdir "${ameba_work_dir}"
               ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${ameba_work_dir}
               rsip -i ${ameba_blobs_dir}/${ameba_km4_blob} -o ${ameba_work_dir}/km4_rsip.bin
               --address ${ameba_km4_rsip_addr} --type image2
 
       # ARM VT {MSP_RAM_HP, KM4 app_start}, scanned from the plaintext KM4 blob.
       COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${ameba_work_dir}
               amebasmart_boot_assets make-vt
               --km4-blob ${ameba_blobs_dir}/${ameba_km4_blob}
               --km4-bd-dram-addr ${ameba_layout_km4_bd_dram}
@@ -254,10 +280,12 @@ if (CONFIG_BOOTLOADER_MCUBOOT)
 
       # Staple [VT][km0][km4][ca32] and reserve the 0x200 mcuboot header.
       COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${ameba_work_dir}
               helper merge -o ${ameba_work_dir}/app_raw.bin
               -i ${ameba_work_dir}/vt.bin ${ameba_work_dir}/km0_rsip.bin
                  ${ameba_work_dir}/km4_rsip.bin ${ameba_work_dir}/ap_image_rsip.bin
       COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${ameba_work_dir}
               pad --input-file ${ameba_work_dir}/app_raw.bin --value 0x0 --length 0x200
               --from-head --no-align --output-file ${ZEPHYR_BINARY_DIR}/${KERNEL_NAME}.bin
     )
@@ -285,27 +313,29 @@ else()
     set_property(GLOBAL APPEND PROPERTY extra_post_build_commands
       COMMAND ${CMAKE_COMMAND} -E copy
               $<TARGET_PROPERTY:tfm,TFM_NS_BIN_FILE>
-              ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app0_cuted.bin
+              ${td}/app0_cuted.bin
     )
   else()
     set_property(GLOBAL APPEND PROPERTY extra_post_build_commands
-      COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py cut
+      COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+              --post-build-dir ${td} cut
               --input-file ${ZEPHYR_BINARY_DIR}/${KERNEL_NAME}.bin
-              --output-file ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app0_cuted.bin
+              --output-file ${td}/app0_cuted.bin
               --length ${CONFIG_ROM_START_OFFSET} # 0x200 when enable mcuboot
     )
   endif()
 
   set_property(GLOBAL APPEND PROPERTY extra_post_build_commands
-    COMMAND ${CMAKE_COMMAND} -E cat ${origin_secondary_image} ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app0_cuted.bin
-                > ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app.bin
-    COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py pad
-            --input-file ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app.bin
+    COMMAND ${CMAKE_COMMAND} -E cat ${origin_secondary_image} ${td}/app0_cuted.bin
+                > ${td}/app.bin
+    COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py
+            --post-build-dir ${td} pad
+            --input-file ${td}/app.bin
             --value 0x0
             --length ${CONFIG_ROM_START_OFFSET} # 0x200 when enable mcuboot
             --from-head
             --no-align
-            --output-file ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app_pad.bin
+            --output-file ${td}/app_pad.bin
     COMMAND ${PYTHON_EXECUTABLE} ${IMGTOOL} sign
           --version ${CONFIG_TFM_IMAGE_VERSION_NS}
           --header-size ${CONFIG_ROM_START_OFFSET}
@@ -316,10 +346,10 @@ else()
           -v ${CONFIG_TFM_IMAGE_VERSION_NS}
           -s ${CONFIG_TFM_IMAGE_SECURITY_COUNTER}
           --boot-record NSPE #REVIEW: Need check option in tfm
-          ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app_pad.bin
-          ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app_signed.bin
+          ${td}/app_pad.bin
+          ${td}/app_signed.bin
     COMMAND ${CMAKE_COMMAND} -E copy
-            ${CMAKE_BINARY_DIR}/${ameba_soc_name}_gcc_project/app_signed.bin
+            ${td}/app_signed.bin
             ${CMAKE_BINARY_DIR}/images/${output_prefix}.bin
   )
 endif()

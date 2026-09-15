@@ -247,7 +247,6 @@
 			reg = <0x41008000 0x100>;
 			interrupts = <62 0>;
 			clocks = <&rcc AMEBA_LEDC_CLK>;
-			dma-mode = <0>;
 			chain-length = <16>;
 			output-rgb-mode = <0>;
 			color-mapping = <LED_COLOR_ID_GREEN

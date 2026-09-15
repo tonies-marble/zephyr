@@ -12,8 +12,10 @@
 #include <zephyr/dt-bindings/clock/amebasmart_clock.h>
 #include <zephyr/dt-bindings/gpio/gpio.h>
 #include <zephyr/dt-bindings/dma/ameba_dma.h>
+#include <zephyr/dt-bindings/led/led.h>
 #include <zephyr/dt-bindings/pinctrl/amebasmart-pinctrl.h>
 #include <zephyr/dt-bindings/power/amebasmart_power.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
 
 / {
 
@@ -159,10 +161,41 @@
 			status = "disabled";
 		};
 
+		ledc: ledc@41008000 {
+			compatible = "realtek,ameba-ledc";
+			reg = <0x41008000 0x100>;
+			interrupts = <GIC_SPI 68 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
+			clocks = <&rcc AMEBA_LEDC_CLK>;
+			chain-length = <16>;
+			output-rgb-mode = <0>;
+			color-mapping = <LED_COLOR_ID_GREEN
+					 LED_COLOR_ID_RED
+					 LED_COLOR_ID_BLUE>;
+			wait-data-timeout = <0x3a97>;
+			data-tx-time0h = <0xc>;
+			data-tx-time0l = <0x18>;
+			data-tx-time1h = <0x18>;
+			data-tx-time1l = <0xc>;
+			refresh-time = <0x3fff>;
+			status = "disabled";
+		};
+
 		trng: trng@41009000 {
 			compatible = "realtek,ameba-trng";
 			reg = <0x41009000 0x200>;
 			clocks = <&rcc AMEBA_TRNG_CLK>;
+			status = "disabled";
+		};
+
+		/* The PWM Timer (TIM8) supports Input Capture Mode or PWM Mode */
+		pwm0: pwm@4100a000 {
+			compatible = "realtek,ameba-pwm";
+			reg = <0x4100a000 0x88>;
+			interrupts = <GIC_SPI 57 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
+			channel-count = <8>;
+			index = <0>;
+			clocks = <&rcc AMEBA_TIM8_CLK>;
+			#pwm-cells = <3>;
 			status = "disabled";
 		};
 

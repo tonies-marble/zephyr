@@ -32,18 +32,21 @@ set_property(GLOBAL APPEND PROPERTY extra_post_build_commands
     COMMAND ${CMAKE_OBJCOPY} -O binary --remove-section=.ram_image1.entry
         ${ZEPHYR_BINARY_DIR}/${KERNEL_ELF_NAME} ${td}/xip_all.bin
     # 2. cut by map
-    COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py helper cut-by-map
+    #NOTE: --post-build-dir must be passed to every axf2bin.py call: without it the
+    #      script falls back to cwd (${ZEPHYR_BINARY_DIR}) for project detection, which
+    #      misparses build directories named build_* as a standalone-SDK SoC project.
+    COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py --post-build-dir ${td} helper cut-by-map
         --input-file ${td}/xip_all.bin
         --output-file ${td}/xip_boot.bin
         --map-file ${ZEPHYR_BINARY_DIR}/${KERNEL_NAME}.raw.map
         --start-sym "__rom_region_start"
         --end-sym ${boot_text_start}
     # 3. pad 32
-    COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py pad
+    COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py --post-build-dir ${td} pad
         --input-file ${td}/xip_boot.bin
         --length 32
     # 4. prepend header to xip_boot
-    COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py prepend_header
+    COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py --post-build-dir ${td} prepend_header
         --output-file ${td}/xip_boot_prepend.bin
         --input-file ${td}/xip_boot.bin
         --map-file ${ZEPHYR_BINARY_DIR}/${KERNEL_NAME}.raw.map
@@ -53,7 +56,7 @@ set_property(GLOBAL APPEND PROPERTY extra_post_build_commands
     COMMAND ${CMAKE_OBJCOPY} -O binary --only-section=.ram_image1.entry
         ${ZEPHYR_BINARY_DIR}/${KERNEL_ELF_NAME} ${td}/ram_1.bin
     # 6. prepend header to ram_1
-    COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py prepend_header
+    COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/axf2bin.py --post-build-dir ${td} prepend_header
         --output-file ${td}/ram_1_prepend.bin
         --input-file ${td}/ram_1.bin
         --map-file ${ZEPHYR_BINARY_DIR}/${KERNEL_NAME}.raw.map

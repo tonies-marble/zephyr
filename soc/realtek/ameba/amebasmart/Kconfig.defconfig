@@ -6,6 +6,12 @@ if SOC_RTL8730E_CA32
 config CACHE_MANAGEMENT
 	default y
 
+config DCACHE_LINE_SIZE
+	default 64
+
+config ICACHE_LINE_SIZE
+	default 32
+
 config NUM_IRQS
 	# CA32 highest SPI: AON_TIM_IRQ=95, GIC INTID=95+32=127, so NUM_IRQS=128.
 	# GIC v3 ITS: LPIs start at 8192, reserve 16384 total.

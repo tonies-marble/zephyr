@@ -1,0 +1,16 @@
+/ {
+	aliases {
+		led-strip = &ledc;
+	};
+};
+
+&ledc {
+	pinctrl-0 = <&ledc_default>;
+	pinctrl-names = "default";
+	chain-length = <15>;
+	status = "okay";
+};
+
+&pinctrl {
+	status = "okay";
+};

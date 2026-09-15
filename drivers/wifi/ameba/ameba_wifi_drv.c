@@ -97,7 +97,9 @@ static int ameba_wifi_send(const struct device *dev, struct net_pkt *pkt)
 
 #if defined(CONFIG_WHC_HOST)
 #if defined(CONFIG_SOC_SERIES_AMEBAD)
-	(void)idx; (void)pkt; (void)pkt_len; /* single-core WiFi: TX handled by WiFi task */
+	(void)idx;
+	(void)pkt;
+	(void)pkt_len; /* single-core WiFi: TX handled by WiFi task */
 #else
 	whc_host_send_zephyr(idx, pkt, pkt_len);
 #endif
@@ -118,8 +120,7 @@ int eth_rtk_rx(uint8_t idx, void *buffer, uint16_t len)
 		return -EIO;
 	}
 
-	pkt = net_pkt_rx_alloc_with_buffer(ameba_wifi_iface[idx], len,
-					   AF_UNSPEC, 0, K_MSEC(100));
+	pkt = net_pkt_rx_alloc_with_buffer(ameba_wifi_iface[idx], len, AF_UNSPEC, 0, K_MSEC(100));
 	if (!pkt) {
 		LOG_ERR("Failed to get net buffer");
 		return -EIO;
@@ -277,7 +278,7 @@ report:
 	return 0;
 }
 
-static void ameba_wifi_handle_connect_event(void)
+void ameba_wifi_handle_connect_event(void)
 {
 	net_eth_carrier_on(ameba_wifi_iface[STA_WLAN_INDEX]);
 
@@ -388,10 +389,15 @@ static int ameba_wifi_connect(const struct device *dev, struct wifi_connect_req_
 		channel = 0;
 	}
 
-	if (params->security == WIFI_SECURITY_TYPE_PSK ||
-	    params->security == WIFI_SECURITY_TYPE_SAE) {
+	if (params->security == WIFI_SECURITY_TYPE_PSK) {
 		psk = (uint8_t *)params->psk;
 		psk_len = params->psk_length;
+	} else if (params->security == WIFI_SECURITY_TYPE_SAE ||
+		   params->security == WIFI_SECURITY_TYPE_SAE_H2E ||
+		   params->security == WIFI_SECURITY_TYPE_SAE_AUTO ||
+		   params->security == WIFI_SECURITY_TYPE_FT_SAE) {
+		psk = (uint8_t *)params->sae_password;
+		psk_len = params->sae_password_length;
 	} else if (params->security == WIFI_SECURITY_TYPE_NONE) {
 		psk = NULL;
 		psk_len = 0;
@@ -614,11 +620,10 @@ static int ameba_wifi_dev_init(const struct device *dev)
 		return 0;
 	}
 
-	k_tid_t tid =
-		k_thread_create(&ameba_wifi_event_thread, ameba_wifi_event_stack,
-				CONFIG_AMEBA_WIFI_EVENT_STACK_SIZE,
-				(k_thread_entry_t)ameba_wifi_event_task,
-				NULL, NULL, NULL, 14, K_INHERIT_PERMS, K_NO_WAIT);
+	k_tid_t tid = k_thread_create(&ameba_wifi_event_thread, ameba_wifi_event_stack,
+				      CONFIG_AMEBA_WIFI_EVENT_STACK_SIZE,
+				      (k_thread_entry_t)ameba_wifi_event_task, NULL, NULL, NULL, 14,
+				      K_INHERIT_PERMS, K_NO_WAIT);
 
 	k_thread_name_set(tid, dev->name);
 

@@ -56,7 +56,6 @@ int rtos_mutex_take(rtos_mutex_t p_handle, uint32_t wait_ms)
 	}
 
 	if (rtos_critical_is_in_interrupt()) {
-		LOG_ERR("%s: called from ISR", __func__);
 		return RTK_FAIL;
 	}
 
@@ -86,7 +85,6 @@ int rtos_mutex_give(rtos_mutex_t p_handle)
 	}
 
 	if (rtos_critical_is_in_interrupt()) {
-		LOG_ERR("%s: called from ISR", __func__);
 		return RTK_FAIL;
 	}
 
