@@ -14,3 +14,8 @@
 &pinctrl {
 	status = "okay";
 };
+
+/* Required only when built with CONFIG_LEDC_AMEBA_DMA=y; harmless otherwise. */
+&dma {
+	status = "okay";
+};

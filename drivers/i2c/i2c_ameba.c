@@ -38,9 +38,9 @@ struct i2c_dma_stream {
 #endif
 
 struct i2c_ameba_data {
-	uint32_t master_mode;
+	uint32_t controller_mode;
 	uint32_t addr_mode;
-	uint32_t slave_address;
+	uint32_t target_address;
 	uint32_t dev_config;
 	struct i2c_msg *current;
 	volatile int flag_done;
@@ -113,7 +113,7 @@ static void i2c_ameba_isr(const struct device *dev)
 
 #ifdef CONFIG_I2C_ASYNC_API
 static void i2c_ameba_dma_tx_cb(const struct device *dma_dev, void *user_data, uint32_t channel,
-			 int status)
+				int status)
 {
 	struct device *dev = user_data;
 	struct i2c_ameba_data *data = dev->data;
@@ -140,7 +140,7 @@ static void i2c_ameba_dma_tx_cb(const struct device *dma_dev, void *user_data, u
 }
 
 static void i2c_ameba_dma_rx_cb(const struct device *dma_dev, void *user_data, uint32_t channel,
-			 int status)
+				int status)
 {
 	struct device *dev = user_data;
 	struct i2c_ameba_data *data = dev->data;
@@ -274,7 +274,7 @@ static int i2c_rx_dma_config(const struct device *dev, uint8_t *pdata, uint32_t 
 	return dma_config(i2c_dma->dma_dev, i2c_dma->dma_channel, &i2c_dma->dma_cfg);
 }
 
-static int i2c_send_dma_master(const struct device *dev, uint8_t *pdata, uint32_t length)
+static int i2c_send_dma_controller(const struct device *dev, uint8_t *pdata, uint32_t length)
 {
 	struct i2c_ameba_data *data = dev->data;
 	const struct i2c_ameba_config *cfg = dev->config;
@@ -293,7 +293,7 @@ static int i2c_send_dma_master(const struct device *dev, uint8_t *pdata, uint32_
 	return 0;
 }
 
-static int i2c_send_dma_slave(const struct device *dev, uint8_t *pdata, uint32_t length)
+static int i2c_send_dma_target(const struct device *dev, uint8_t *pdata, uint32_t length)
 {
 	struct i2c_ameba_data *data = dev->data;
 	const struct i2c_ameba_config *cfg = dev->config;
@@ -314,7 +314,7 @@ static int i2c_send_dma_slave(const struct device *dev, uint8_t *pdata, uint32_t
 	return 0;
 }
 
-static int i2c_receive_dma_master(const struct device *dev, uint8_t *pdata, uint32_t length)
+static int i2c_receive_dma_controller(const struct device *dev, uint8_t *pdata, uint32_t length)
 {
 	struct i2c_ameba_data *data = dev->data;
 	const struct i2c_ameba_config *cfg = dev->config;
@@ -333,7 +333,7 @@ static int i2c_receive_dma_master(const struct device *dev, uint8_t *pdata, uint
 	return 0;
 }
 
-static int i2c_receive_dma_slave(const struct device *dev, uint8_t *pdata, uint32_t length)
+static int i2c_receive_dma_target(const struct device *dev, uint8_t *pdata, uint32_t length)
 {
 	struct i2c_ameba_data *data = dev->data;
 	const struct i2c_ameba_config *cfg = dev->config;
@@ -397,7 +397,7 @@ static int i2c_ameba_configure(const struct device *dev, uint32_t dev_config)
 		goto error;
 	}
 
-	data->master_mode = I2C_InitStruct.I2CMaster;
+	data->controller_mode = I2C_InitStruct.I2CMaster;
 	data->addr_mode = I2C_InitStruct.I2CAddrMod;
 	data->dev_config = dev_config;
 
@@ -459,8 +459,8 @@ static int i2c_ameba_validate_msgs(struct i2c_msg *msgs, uint8_t num_msgs)
 	return 0;
 }
 
-static int i2c_ameba_transfer(const struct device *dev, struct i2c_msg *msgs,
-			      uint8_t num_msgs, uint16_t addr)
+static int i2c_ameba_transfer(const struct device *dev, struct i2c_msg *msgs, uint8_t num_msgs,
+			      uint16_t addr)
 {
 	struct i2c_ameba_data *data = dev->data;
 	const struct i2c_ameba_config *config = dev->config;
@@ -477,7 +477,7 @@ static int i2c_ameba_transfer(const struct device *dev, struct i2c_msg *msgs,
 	I2C_SetSlaveAddress(i2c, addr);
 	/* Enable i2c device */
 	I2C_Cmd(i2c, ENABLE);
-	data->slave_address = addr;
+	data->target_address = addr;
 
 	/* 3. Execute Transfer */
 #if defined(CONFIG_I2C_AMEBA_INTERRUPT)
@@ -485,7 +485,7 @@ static int i2c_ameba_transfer(const struct device *dev, struct i2c_msg *msgs,
 	for (uint8_t i = 0; i < num_msgs; ++i) {
 		data->current = &msgs[i];
 
-		if (data->master_mode == 1) {
+		if (data->controller_mode == 1) {
 			data->flag_done = 0;
 			I2C_INTConfig(i2c, I2C_BIT_R_STOP_DET, ENABLE);
 
@@ -510,23 +510,23 @@ static int i2c_ameba_transfer(const struct device *dev, struct i2c_msg *msgs,
 		data->current = &msgs[i];
 		data->flag_dma_done = 0;
 		I2C_Cmd(i2c, ENABLE);
-		if (data->master_mode == 1) {
+		if (data->controller_mode == 1) {
 			if ((data->current->flags & I2C_MSG_RW_MASK) == I2C_MSG_WRITE) {
-				i2c_send_dma_master(dev, data->current->buf, data->current->len);
+				i2c_send_dma_controller(dev, data->current->buf, data->current->len);
 				while (data->flag_dma_done == 0) {
 				}
 			} else {
-				i2c_receive_dma_master(dev, data->current->buf, data->current->len);
+				i2c_receive_dma_controller(dev, data->current->buf, data->current->len);
 				while (data->flag_dma_done == 0) {
 				}
 			}
 		} else {
 			if ((data->current->flags & I2C_MSG_RW_MASK) == I2C_MSG_WRITE) {
-				i2c_send_dma_slave(dev, data->current->buf, data->current->len);
+				i2c_send_dma_target(dev, data->current->buf, data->current->len);
 				while (data->flag_dma_done == 0) {
 				}
 			} else {
-				i2c_receive_dma_slave(dev, data->current->buf, data->current->len);
+				i2c_receive_dma_target(dev, data->current->buf, data->current->len);
 				while (data->flag_dma_done == 0) {
 				}
 			}
@@ -534,20 +534,32 @@ static int i2c_ameba_transfer(const struct device *dev, struct i2c_msg *msgs,
 	}
 #else
 	for (uint8_t i = 0; i < num_msgs; ++i) {
+		uint32_t xfer_len;
+
 		k_sleep(K_MSEC(5));
 		data->current = &msgs[i];
-		if (data->master_mode == 1) {
+		if (data->controller_mode == 1) {
 			if ((data->current->flags & I2C_MSG_RW_MASK) == I2C_MSG_WRITE) {
-				I2C_MasterWrite(i2c, data->current->buf, data->current->len);
+				xfer_len = I2C_MasterWrite(i2c, data->current->buf,
+							   data->current->len);
 			} else {
-				I2C_MasterRead(i2c, data->current->buf, data->current->len);
+				xfer_len =
+					I2C_MasterRead(i2c, data->current->buf, data->current->len);
 			}
 		} else {
 			if ((data->current->flags & I2C_MSG_RW_MASK) == I2C_MSG_WRITE) {
-				I2C_SlaveWrite(i2c, data->current->buf, data->current->len);
+				xfer_len =
+					I2C_SlaveWrite(i2c, data->current->buf, data->current->len);
 			} else {
-				I2C_SlaveRead(i2c, data->current->buf, data->current->len);
+				xfer_len =
+					I2C_SlaveRead(i2c, data->current->buf, data->current->len);
 			}
+		}
+
+		if (xfer_len < data->current->len) {
+			LOG_ERR("I2C transfer aborted: %u/%u bytes (addr 0x%x)", xfer_len,
+				data->current->len, addr);
+			return -EIO;
 		}
 	}
 #endif

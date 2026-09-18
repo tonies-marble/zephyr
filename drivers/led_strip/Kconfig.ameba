@@ -10,3 +10,34 @@ config LEDC_AMEBA
 	select LED_STRIP_RGB_SCRATCH
 	help
 	  Enable support for Ameba led controller driver.
+
+if LEDC_AMEBA
+
+choice LEDC_AMEBA_TRANSFER_MODE
+	prompt "Ameba LEDC transfer mode"
+	default LEDC_AMEBA_CPU
+	help
+	  Select how pixel data is fed to the LEDC FIFO.
+
+	config LEDC_AMEBA_CPU
+		bool "CPU (interrupt-driven FIFO refill)"
+		help
+		  The CPU refills the LEDC FIFO from an interrupt handler each
+		  time the FIFO level drops below the trigger threshold. No DMA
+		  channel is required, but long chains risk a wait-data timeout
+		  if interrupt latency is high.
+
+	config LEDC_AMEBA_DMA
+		bool "DMA"
+		select DMA
+		select CACHE_MANAGEMENT
+		help
+		  A GDMA channel feeds the LEDC FIFO via hardware handshake. The
+		  CPU is only interrupted once per frame (on transfer finish),
+		  making long chains robust against the wait-data timeout.
+		  Requires a "tx" dmas entry on the ledc node and the GDMA
+		  controller enabled.
+
+endchoice
+
+endif # LEDC_AMEBA

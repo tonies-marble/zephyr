@@ -21,6 +21,12 @@
 
 #include <zephyr/kernel.h>
 
+#ifdef CONFIG_LEDC_AMEBA_DMA
+#include <zephyr/drivers/dma.h>
+#include <zephyr/cache.h>
+#include "dma_ameba_gdma.h"
+#endif
+
 #define LOG_LEVEL CONFIG_LED_STRIP_LOG_LEVEL
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(ledc_ameba);
@@ -29,17 +35,34 @@ LOG_MODULE_REGISTER(ledc_ameba);
 #define RESULT_COMPLETE 1
 #define RESULT_ERR      2
 
-/* Generous upper bound for a LEDC_MAX_LED_NUM transfer plus wait-data margin */
 #define LEDC_TX_TIMEOUT K_MSEC(1000)
+
+/* One packed word per pixel */
+#define LEDC_TX_BUF_WORDS DT_INST_PROP(0, chain_length)
+
+#ifdef CONFIG_LEDC_AMEBA_DMA
+#define LEDC_TX_BUF_ALIGN CONFIG_DCACHE_LINE_SIZE
+#else
+#define LEDC_TX_BUF_ALIGN sizeof(uint32_t)
+#endif
+
+static uint32_t ledc_tx_buf[LEDC_TX_BUF_WORDS] __aligned(LEDC_TX_BUF_ALIGN);
 
 struct ameba_ledc_data_struct {
 	LEDC_InitTypeDef ledc_init_struct;
 
-	uint32_t *tx_data;     /* tx data handle */
+	uint32_t *tx_data;     /* tx data handle (points at ledc_tx_buf) */
 	uint16_t tx_total_len; /* tx total length */
 	uint16_t tx_len;       /* tx len that has been wrote to the FIFO */
 	uint8_t irq_result;    /* tx status, published to the caller via tx_done_sem */
 	struct k_sem tx_done_sem;
+
+#ifdef CONFIG_LEDC_AMEBA_DMA
+	const struct device *dma_dev;
+	uint32_t dma_channel;
+	struct dma_config dma_cfg;
+	struct dma_block_config blk_cfg;
+#endif
 };
 
 struct ameba_ledc_cfg_struct {
@@ -48,6 +71,7 @@ struct ameba_ledc_cfg_struct {
 	const uint8_t *color_mapping;
 	const clock_control_subsys_t clock_subsys;
 
+	/* Raw LEDC register counts of 25 ns each, not nanoseconds despite the name */
 	uint32_t wait_data_time_ns;
 	uint32_t reset_ns;
 
@@ -66,14 +90,16 @@ static void ameba_ledc_isr_handle(const struct device *dev)
 {
 	struct ameba_ledc_data_struct *pdata = dev->data;
 	uint32_t intr_status;
-	uint32_t ledc_fifothr;
-	uint32_t *start_addr;
 
 	LEDC_INTConfig(LEDC_DEV, LEDC_BIT_GLOBAL_INT_EN, DISABLE);
 
 	intr_status = LEDC_GetINT(LEDC_DEV);
 
+#ifndef CONFIG_LEDC_AMEBA_DMA
 	if (intr_status & LEDC_BIT_FIFO_CPUREQ_INT) {
+		uint32_t ledc_fifothr;
+		uint32_t *start_addr;
+
 		LEDC_ClearINT(LEDC_DEV, LEDC_BIT_FIFO_CPUREQ_INT);
 
 		ledc_fifothr = LEDC_GetFIFOLevel(LEDC_DEV);
@@ -89,6 +115,7 @@ static void ameba_ledc_isr_handle(const struct device *dev)
 		LEDC_INTConfig(LEDC_DEV, LEDC_BIT_GLOBAL_INT_EN, ENABLE);
 		return;
 	}
+#endif /* !CONFIG_LEDC_AMEBA_DMA */
 
 	if (intr_status & LEDC_BIT_LED_TRANS_FINISH_INT) {
 		LEDC_ClearINT(LEDC_DEV, LEDC_BIT_LED_TRANS_FINISH_INT);
@@ -118,13 +145,66 @@ static void ameba_ledc_isr_handle(const struct device *dev)
 	LEDC_INTConfig(LEDC_DEV, LEDC_BIT_GLOBAL_INT_EN, ENABLE);
 }
 
+#ifdef CONFIG_LEDC_AMEBA_DMA
+static void ameba_ledc_dma_callback(const struct device *dma_dev, void *arg, uint32_t channel,
+				    int status)
+{
+	const struct device *dev = arg;
+	struct ameba_ledc_data_struct *pdata = dev->data;
+
+	ARG_UNUSED(dma_dev);
+	ARG_UNUSED(channel);
+
+	if (status < 0) {
+		LOG_ERR("Ledc DMA error %d", status);
+		pdata->irq_result = RESULT_ERR;
+		k_sem_give(&pdata->tx_done_sem);
+	}
+
+	/* Completion is handled by the LEDC LED_TRANS_FINISH interrupt */
+}
+
+static int ameba_ledc_dma_start(const struct device *dev, uint16_t data_len)
+{
+	struct ameba_ledc_data_struct *pdata = dev->data;
+	int ret;
+
+	pdata->dma_cfg.head_block = &pdata->blk_cfg;
+	pdata->dma_cfg.user_data = (void *)dev;
+
+	pdata->blk_cfg.source_address = (uint32_t)pdata->tx_data;
+	pdata->blk_cfg.source_addr_adj = DMA_ADDR_ADJ_INCREMENT;
+	pdata->blk_cfg.dest_address = (uint32_t)&LEDC_DEV->LEDC_DATA_REG;
+	pdata->blk_cfg.dest_addr_adj = DMA_ADDR_ADJ_NO_CHANGE;
+	pdata->blk_cfg.block_size = (uint32_t)data_len * sizeof(uint32_t);
+
+	ret = dma_config(pdata->dma_dev, pdata->dma_channel, &pdata->dma_cfg);
+	if (ret < 0) {
+		LOG_ERR("dma_config failed %d", ret);
+		return ret;
+	}
+
+	/* Clean D-cache before the DMA reads the buffer */
+	sys_cache_data_flush_range(pdata->tx_data, pdata->blk_cfg.block_size);
+
+	ret = dma_start(pdata->dma_dev, pdata->dma_channel);
+	if (ret < 0) {
+		LOG_ERR("dma_start failed %d", ret);
+		return ret;
+	}
+
+	return 0;
+}
+#endif /* CONFIG_LEDC_AMEBA_DMA */
+
 static int ameba_ledc_update_rgb(const struct device *dev, struct led_rgb *pixels,
 				 size_t num_pixels)
 {
 	const struct ameba_ledc_cfg_struct *cfg = dev->config;
 	struct ameba_ledc_data_struct *pdata = dev->data;
 	uint16_t data_len = (uint16_t)num_pixels;
-	uint8_t i;
+	uint16_t i;
+	int ret = 0;
 
 	/* LEDC_MAX_DATA_LENGTH 0x2000 */
 	if (!IS_LEDC_DATA_LENGTH(num_pixels)) {
@@ -132,8 +212,15 @@ static int ameba_ledc_update_rgb(const struct device *dev, struct led_rgb *pixel
 		data_len = LEDC_MAX_DATA_LENGTH;
 	}
 
+	/* Internal buffer is sized to the configured chain length */
+	if (data_len > LEDC_TX_BUF_WORDS) {
+		LOG_WRN("num_pixels %u > chain-length %u, truncating", data_len,
+			(unsigned int)LEDC_TX_BUF_WORDS);
+		data_len = LEDC_TX_BUF_WORDS;
+	}
+
 	pdata->tx_len = 0;
-	pdata->tx_data = (uint32_t *)pixels;
+	pdata->tx_data = ledc_tx_buf;
 	pdata->tx_total_len = data_len;
 	pdata->irq_result = RESULT_RUNNING;
 	k_sem_reset(&pdata->tx_done_sem);
@@ -141,52 +228,68 @@ static int ameba_ledc_update_rgb(const struct device *dev, struct led_rgb *pixel
 	pdata->ledc_init_struct.data_length = data_len;
 	LEDC_SetTotalLength(LEDC_DEV, pdata->ledc_init_struct.data_length);
 
-	LOG_DBG("Write %d data/0x%08x cnt %d", pdata->ledc_init_struct.data_length,
-		pdata->tx_data[0], cfg->num_colors);
-
-	/* color_mapping[] is on-wire byte order (color_mapping[0] sent first),
-	 * same convention as mainline ws2812 drivers. LEDC clocks the packed
-	 * word out MSB-first, so pack color_mapping[0] into the top byte.
-	 */
-	for (i = 0; i < num_pixels; i++) {
+	/* Pack color_mapping[0] into the top used byte (sent first, MSB-first) */
+	for (i = 0; i < data_len; i++) {
+		uint32_t word = 0;
+		uint8_t shift = (cfg->num_colors - 1) * 8;
 		uint8_t j;
-		struct led_rgb pixel_tmp = {0, 0, 0, 0};
-		uint8_t *ptr = (uint8_t *)&pixel_tmp + (cfg->num_colors - 1);
 
 		for (j = 0; j < cfg->num_colors; j++) {
+			uint8_t val;
+
 			switch (cfg->color_mapping[j]) {
 			case LED_COLOR_ID_RED:
-				*ptr-- = pixels[i].r;
+				val = pixels[i].r;
 				break;
 			case LED_COLOR_ID_GREEN:
-				*ptr-- = pixels[i].g;
+				val = pixels[i].g;
 				break;
 			case LED_COLOR_ID_BLUE:
-				*ptr-- = pixels[i].b;
+				val = pixels[i].b;
 				break;
 			default:
 				return -EINVAL;
 			}
+
+			word |= (uint32_t)val << shift;
+			shift -= 8;
 		}
 
-		memcpy(pixels + i, &pixel_tmp, sizeof(struct led_rgb));
+		ledc_tx_buf[i] = word;
 	}
-	LOG_DBG("Write %d data 0x%08x", num_pixels, pdata->tx_data[0]);
+
+	LOG_DBG("Write %d data 0x%08x cnt %d", data_len, ledc_tx_buf[0], cfg->num_colors);
+
+#ifdef CONFIG_LEDC_AMEBA_DMA
+	/* Arm DMA before enabling LEDC */
+	ret = ameba_ledc_dma_start(dev, data_len);
+	if (ret < 0) {
+		return ret;
+	}
+#endif
 
 	LEDC_Cmd(LEDC_DEV, ENABLE);
 
 	if (k_sem_take(&pdata->tx_done_sem, LEDC_TX_TIMEOUT) != 0) {
 		LOG_WRN("Ledc TX timeout");
-		return -ETIMEDOUT;
+		ret = -ETIMEDOUT;
+		goto out;
 	}
 
 	if (pdata->irq_result == RESULT_COMPLETE) {
 		LOG_DBG("Ledc TX done!");
-		return 0;
+		ret = 0;
+		goto out;
 	}
 
 	LOG_WRN("Ledc exit %d", pdata->irq_result);
-	return -EFAULT;
+	ret = -EFAULT;
+
+out:
+#ifdef CONFIG_LEDC_AMEBA_DMA
+	dma_stop(pdata->dma_dev, pdata->dma_channel);
+#endif
+	return ret;
 }
 
 static int ameba_ledc_update_channels(const struct device *dev, uint8_t *channels,
@@ -226,6 +329,13 @@ static int ameba_ledc_init(const struct device *dev)
 		return err;
 	}
 
+#ifdef CONFIG_LEDC_AMEBA_DMA
+	if (!device_is_ready(data->dma_dev)) {
+		LOG_ERR("DMA device not ready");
+		return -ENODEV;
+	}
+#endif
+
 	/* enable pinctrl */
 	if (pinctrl_apply_state(cfg->pinctrl_dev, PINCTRL_STATE_DEFAULT)) {
 		LOG_ERR("Pinctrl device not ready");
@@ -247,7 +357,11 @@ static int ameba_ledc_init(const struct device *dev)
 	LEDC_StructInit(pledc_init_struct);
 
 	pledc_init_struct->led_count = led_num;
+#ifdef CONFIG_LEDC_AMEBA_DMA
+	pledc_init_struct->ledc_trans_mode = LEDC_DMA_MODE;
+#else
 	pledc_init_struct->ledc_trans_mode = LEDC_CPU_MODE;
+#endif
 	pledc_init_struct->t1h_ns = cfg->t1h_ns;
 	pledc_init_struct->t1l_ns = cfg->t1l_ns;
 	pledc_init_struct->t0h_ns = cfg->t0h_ns;
@@ -260,8 +374,9 @@ static int ameba_ledc_init(const struct device *dev)
 	pledc_init_struct->ledc_polarity = LEDC_IDLE_POLARITY_LOW;
 	pledc_init_struct->wait_time0_en = ENABLE;
 	pledc_init_struct->wait_time1_en = ENABLE;
-	pledc_init_struct->wait_time0_ns = 0xEF;      /* 6us */
-	pledc_init_struct->wait_time1_ns = 0x2625A00; /* 1000000000ns */
+	/* Register counts of 25 ns each, WAIT_TIME = 25 ns * (count + 1) */
+	pledc_init_struct->wait_time0_ns = 0xEF;      /* ~6 us */
+	pledc_init_struct->wait_time1_ns = 0x2625A00; /* ~1 s */
 
 	LEDC_Init(LEDC_DEV, pledc_init_struct);
 
@@ -276,7 +391,13 @@ static int ameba_ledc_init(const struct device *dev)
 
 PINCTRL_DT_INST_DEFINE(0);
 static const uint8_t ameba_ledc_color_mapping[] = DT_INST_PROP(0, color_mapping);
-static struct ameba_ledc_data_struct ameba_ledc_data;
+static struct ameba_ledc_data_struct ameba_ledc_data = {
+#ifdef CONFIG_LEDC_AMEBA_DMA
+	.dma_dev = DEVICE_DT_GET(DT_INST_DMAS_CTLR_BY_NAME(0, tx)),
+	.dma_channel = DT_INST_DMAS_CELL_BY_NAME(0, tx, channel),
+	.dma_cfg = AMEBA_DMA_CONFIG(0, tx, 1, ameba_ledc_dma_callback),
+#endif
+};
 static const struct ameba_ledc_cfg_struct ameba_ledc_cfg = {
 	.pinctrl_dev = PINCTRL_DT_INST_DEV_CONFIG_GET(0),
 	.clock_dev = DEVICE_DT_GET(DT_INST_CLOCKS_CTLR(0)),

@@ -250,14 +250,16 @@
 			chain-length = <16>;
 			output-rgb-mode = <0>;
 			color-mapping = <LED_COLOR_ID_GREEN
-							LED_COLOR_ID_RED
-							LED_COLOR_ID_BLUE>;
+					 LED_COLOR_ID_RED
+					 LED_COLOR_ID_BLUE>;
 			wait-data-timeout = <0x3a97>;
 			data-tx-time0h = <0xc>;
 			data-tx-time0l = <0x18>;
 			data-tx-time1h = <0x18>;
 			data-tx-time1l = <0xc>;
 			refresh-time = <0x3fff>;
+			dmas = <&dma 5 20 0x610921>;
+			dma-names = "tx";
 			status = "disabled";
 		};
 
@@ -476,6 +478,7 @@
 			index = <0>;
 			clocks = <&rcc AMEBA_PWM0_CLK>;
 			#pwm-cells = <3>;
+			prescale = <39>;
 			status = "disabled";
 		};
 

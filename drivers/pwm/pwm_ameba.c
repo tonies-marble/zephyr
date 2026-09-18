@@ -11,20 +11,35 @@
 #include <ameba_soc.h>
 
 #include <zephyr/drivers/pwm.h>
-#include <zephyr/drivers/pwm/pwm_ameba.h>
 #include <zephyr/drivers/pinctrl.h>
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(pwm_ameba, CONFIG_PWM_LOG_LEVEL);
 
+/* Ameba PWM private flags
+ * - Bit 8  : Over-current protection (disable OC preload)
+ * - Bit 9  : One-pulse mode
+ * - Bit 10 : External trigger single edge
+ * - Bit 11 : External trigger both edges
+ * - Bit 12 : Default output level
+ */
+#define AMEBA_PWM_OCPROTECTION       (1U << 8)
+#define AMEBA_PWM_MODE               (1U << 9)
+#define AMEBA_OPMODE_ETP_ACTIVE_EDGE (1U << 10)
+#define AMEBA_OPMODE_ETP_BOTH_ACTIVE (1U << 11)
+#define AMEBA_OPMODE_DEFAULT_LEVEL   (1U << 12)
+
+#define AMEBA_PWM_MAX_PERIOD (0x10000U)
+
 #ifdef CONFIG_PWM_CAPTURE
 #define SKIP_IRQ_NUM 3U
 struct pwm_ameba_capture_data {
-	u8 skip_irq;
-	u16 value[SKIP_IRQ_NUM];
-	u16 period;
-	u16 pulse;
+	uint8_t skip_irq;
+	uint16_t value[SKIP_IRQ_NUM];
+	uint16_t period;
+	uint16_t pulse;
+	bool CC_polarity;
 	bool capture_period;
 	bool capture_pulse;
 	pwm_capture_callback_handler_t callback;
@@ -32,10 +47,8 @@ struct pwm_ameba_capture_data {
 };
 #endif /* CONFIG_PWM_CAPTURE */
 struct pwm_ameba_data {
-	u16 prescale;
-	bool CC_polarity;
-	u32 channel_idx;
-	u32 port_count;
+	uint16_t prescale;
+	uint32_t port_count;
 #ifdef CONFIG_PWM_CAPTURE
 	struct pwm_ameba_capture_data capture[PWM_CHAN_MAX];
 #endif /* CONFIG_PWM_CAPTURE */
@@ -43,11 +56,11 @@ struct pwm_ameba_data {
 
 struct pwm_ameba_config {
 	RTIM_TypeDef *pwm_timer;
-	u32 clock_frequency;
+	uint32_t clock_frequency;
 	int irq_source;
 	const struct device *clock_dev;
 	const clock_control_subsys_t clock_subsys;
-	u8 pwm_index;
+	uint8_t pwm_index;
 #ifdef CONFIG_PWM_CAPTURE
 	void (*irq_config_func)(const struct device *dev);
 #endif /* CONFIG_PWM_CAPTURE */
@@ -60,7 +73,12 @@ static int pwm_ameba_get_cycles_per_sec(const struct device *dev, uint32_t chann
 	const struct pwm_ameba_config *config = dev->config;
 	struct pwm_ameba_data *data = dev->data;
 
-	*cycles = (uint64_t)(config->clock_frequency / data->prescale);
+	if (cycles == NULL) {
+		return -EINVAL;
+	}
+
+	/* The PSC register divides the timer clock by (PSC + 1) */
+	*cycles = (uint64_t)(config->clock_frequency / (data->prescale + 1));
 
 	return 0;
 }
@@ -77,8 +95,22 @@ static int pwm_ameba_set_cycles(const struct device *dev, uint32_t channel_idx,
 		return -EINVAL;
 	}
 
-	data->CC_polarity = (flags & PWM_POLARITY_MASK);
-	data->channel_idx = channel_idx;
+	if (pulse_cycles > period_cycles) {
+		LOG_ERR("pulse_cycles %u exceeds period_cycles %u", pulse_cycles, period_cycles);
+		return -EINVAL;
+	}
+
+	if (period_cycles == 0) {
+		LOG_ERR("period_cycles must not be zero");
+		return -EINVAL;
+	}
+
+	if (period_cycles > AMEBA_PWM_MAX_PERIOD) {
+		LOG_ERR("period_cycles %u exceeds the %u tick counter range", period_cycles,
+			AMEBA_PWM_MAX_PERIOD);
+		return -ENOTSUP;
+	}
+
 	RTIM_CCStructInit(&TIM_CCInitStruct);
 	if (flags & PWM_POLARITY_MASK) {
 		TIM_CCInitStruct.TIM_CCPolarity = TIM_CCPolarity_Low;
@@ -88,20 +120,21 @@ static int pwm_ameba_set_cycles(const struct device *dev, uint32_t channel_idx,
 	}
 	TIM_CCInitStruct.TIM_OCPulse = pulse_cycles;
 	RTIM_CCxInit(config->pwm_timer, &(TIM_CCInitStruct), channel_idx);
-	RTIM_ChangePeriodImmediate(config->pwm_timer, period_cycles);
+	/* Counter runs 0..ARR inclusive, so program ARR one short of the period */
+	RTIM_ChangePeriodImmediate(config->pwm_timer, period_cycles - 1U);
 
 	if (flags & AMEBA_PWM_MODE) {
-		if (flags & AMEBA_OPMode_ETP_BothActive) {
+		if (flags & AMEBA_OPMODE_ETP_BOTH_ACTIVE) {
 			RTIM_SetOnePulseOutputMode(config->pwm_timer, TIM_OPMode_Single,
 						   TIM_OPMode_ETP_bothedge);
-		} else if (flags & AMEBA_OPMode_ETP_ActiveEdge) {
+		} else if (flags & AMEBA_OPMODE_ETP_ACTIVE_EDGE) {
 			RTIM_SetOnePulseOutputMode(config->pwm_timer, TIM_OPMode_Single,
 						   TIM_OPMode_ETP_negative);
 		} else {
 			RTIM_SetOnePulseOutputMode(config->pwm_timer, TIM_OPMode_Single,
 						   TIM_OPMode_ETP_positive);
 		}
-		if (flags & AMEBA_OPMode_DefaultLevel) {
+		if (flags & AMEBA_OPMODE_DEFAULT_LEVEL) {
 			RTIM_SetOnePulseDefaultLevel(config->pwm_timer, channel_idx,
 						     TIMPWM_DefaultLevel_High);
 		}
@@ -130,8 +163,8 @@ static int pwm_ameba_configure_capture(const struct device *dev, uint32_t channe
 		return -EBUSY;
 	}
 
-	UPS_SrcConfig(UPS_SRC_GPIO, (u8)(config->pwm_index));
-	UPS_DstConfig(UPS_DST_PWM_TRIG, (u8)(config->pwm_index));
+	UPS_SrcConfig(UPS_SRC_GPIO, (uint8_t)(config->pwm_index));
+	UPS_DstConfig(UPS_DST_PWM_TRIG, (uint8_t)(config->pwm_index));
 
 	RTIM_CCStructInit(&TIM_CCInitStruct);
 	TIM_CCInitStruct.TIM_CCMode = TIM_CCMode_Inputcapture;
@@ -143,7 +176,7 @@ static int pwm_ameba_configure_capture(const struct device *dev, uint32_t channe
 	}
 	RTIM_CCxInit(config->pwm_timer, &(TIM_CCInitStruct), channel_idx);
 
-	data->CC_polarity = (flags & PWM_POLARITY_MASK);
+	data->capture[channel_idx].CC_polarity = (flags & PWM_POLARITY_MASK);
 	data->capture[channel_idx].callback = cb;
 	data->capture[channel_idx].user_data = user_data;
 	data->capture[channel_idx].capture_period = (flags & PWM_CAPTURE_TYPE_PERIOD);
@@ -203,43 +236,46 @@ static void pwm_ameba_isr(const struct device *dev)
 {
 	const struct pwm_ameba_config *config = dev->config;
 	struct pwm_ameba_data *data = dev->data;
-	int channel_idx = data->channel_idx;
+	uint32_t ch;
 
-	if (data->capture[channel_idx].skip_irq < SKIP_IRQ_NUM - 1) {
-		data->capture[channel_idx].value[data->capture[channel_idx].skip_irq] =
-			RTIM_CCRxGet(config->pwm_timer, channel_idx);
-		/*Invert polarity*/
-		if (data->CC_polarity) {
-			RTIM_CCxPolarityConfig(config->pwm_timer, TIM_CCPolarity_High, channel_idx);
+	for (ch = 0; ch < data->port_count; ch++) {
+		if (!RTIM_GetINTStatus(config->pwm_timer, TIM_IT_CC0 << ch)) {
+			continue;
+		}
+
+		if (data->capture[ch].skip_irq < SKIP_IRQ_NUM - 1) {
+			data->capture[ch].value[data->capture[ch].skip_irq] =
+				RTIM_CCRxGet(config->pwm_timer, ch);
+			if (data->capture[ch].CC_polarity) {
+				RTIM_CCxPolarityConfig(config->pwm_timer, TIM_CCPolarity_High, ch);
+			} else {
+				RTIM_CCxPolarityConfig(config->pwm_timer, TIM_CCPolarity_Low, ch);
+			}
+			data->capture[ch].CC_polarity = !data->capture[ch].CC_polarity;
+			data->capture[ch].skip_irq++;
 		} else {
-			RTIM_CCxPolarityConfig(config->pwm_timer, TIM_CCPolarity_Low, channel_idx);
+			data->capture[ch].value[data->capture[ch].skip_irq] =
+				RTIM_CCRxGet(config->pwm_timer, ch);
+			if (data->capture[ch].CC_polarity) {
+				RTIM_CCxPolarityConfig(config->pwm_timer, TIM_CCPolarity_High, ch);
+			} else {
+				RTIM_CCxPolarityConfig(config->pwm_timer, TIM_CCPolarity_Low, ch);
+			}
+			data->capture[ch].CC_polarity = !data->capture[ch].CC_polarity;
+			data->capture[ch].period =
+				data->capture[ch].value[2] - data->capture[ch].value[0];
+			data->capture[ch].pulse =
+				data->capture[ch].value[1] - data->capture[ch].value[0];
+			data->capture[ch].value[0] = data->capture[ch].value[2];
+			data->capture[ch].skip_irq = 1;
+			if (data->capture[ch].callback) {
+				data->capture[ch].callback(dev, ch, data->capture[ch].period,
+							   data->capture[ch].pulse, 0,
+							   data->capture[ch].user_data);
+			}
 		}
-		data->CC_polarity = !data->CC_polarity;
-		data->capture[channel_idx].skip_irq++;
-	} else {
-		data->capture[channel_idx].value[data->capture[channel_idx].skip_irq] =
-			RTIM_CCRxGet(config->pwm_timer, channel_idx);
-		/*Invert polarity*/
-		if (data->CC_polarity) {
-			RTIM_CCxPolarityConfig(config->pwm_timer, TIM_CCPolarity_High, channel_idx);
-		} else {
-			RTIM_CCxPolarityConfig(config->pwm_timer, TIM_CCPolarity_Low, channel_idx);
-		}
-		data->CC_polarity = !data->CC_polarity;
-		data->capture[channel_idx].period =
-			data->capture[channel_idx].value[2] - data->capture[channel_idx].value[0];
-		data->capture[channel_idx].pulse =
-			(data->capture[channel_idx].value[1] - data->capture[channel_idx].value[0]);
-		data->capture[channel_idx].value[0] = data->capture[channel_idx].value[2];
-		data->capture[channel_idx].skip_irq = 1;
-		if (data->capture[channel_idx].callback) {
-			data->capture[channel_idx].callback(dev, channel_idx,
-							    data->capture[channel_idx].period,
-							    data->capture[channel_idx].pulse, 0,
-							    data->capture[channel_idx].user_data);
-		}
+		RTIM_INTClearPendingBit(config->pwm_timer, TIM_IT_CC0 << ch);
 	}
-	RTIM_INTClear(config->pwm_timer);
 }
 #endif /* CONFIG_PWM_CAPTURE */
 
@@ -269,7 +305,7 @@ int pwm_ameba_init(const struct device *dev)
 	RTIM_TimeBaseStructInit(&TIM_InitStruct);
 	TIM_InitStruct.TIM_Prescaler = data->prescale;
 	RTIM_TimeBaseInit(config->pwm_timer, &TIM_InitStruct, config->irq_source, NULL,
-			  (u32)&TIM_InitStruct);
+			  (uint32_t)NULL);
 #ifdef CONFIG_PWM_CAPTURE
 	config->irq_config_func(dev);
 #endif /* CONFIG_PWM_CAPTURE */
@@ -315,6 +351,7 @@ static DEVICE_API(pwm, pwm_ameba_api) = {
 		.clock_subsys = (clock_control_subsys_t)DT_INST_CLOCKS_CELL(n, idx),               \
 		.clock_frequency = DT_INST_PROP(n, clock_frequency),                               \
 		.pwm_index = DT_INST_PROP(n, index),                                               \
+		.irq_source = DT_INST_IRQN(n),                                                     \
 		CAPTURE_INIT(n)};                                                                  \
 	DEVICE_DT_INST_DEFINE(n, &pwm_ameba_init, NULL, &pwm_ameba_data_##n,                       \
 			      &pwm_ameba_config_##n, POST_KERNEL, CONFIG_PWM_INIT_PRIORITY,        \

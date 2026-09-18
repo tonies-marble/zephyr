@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 if(CONFIG_CPU_CORTEX_M)
-  add_subdirectory(${ZEPHYR_CURRENT_MODULE_DIR} cmsis_6)
   zephyr_include_directories(.)
   zephyr_include_directories(${ZEPHYR_CURRENT_MODULE_DIR}/CMSIS/Core/Include)
 

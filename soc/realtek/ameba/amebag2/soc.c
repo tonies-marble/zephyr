@@ -35,16 +35,24 @@ u32 SOC_OSC131_Enable(void)
 	u32 temp;
 
 	/*
-	 * NOTE: this shortcut also skips SDM32K_Enable() and SYSTIMER_Init() below,
-	 * which start the ameba system timer (TIM0) that SYSTIMER_TickGet() and the
-	 * PM code's sleep-time recovery read. Measured on both //ns and //mcuboot the
-	 * RTC clock is still off here, so the shortcut is never taken -- but a caller
-	 * that arrives with it enabled would leave the system timer stopped at 0.
-	 * The SDK splits the two: ameba_app_start.c starts the system timer
-	 * unconditionally in rtc_irq_init() and again in app_start() for the case
-	 * where OSC131 was already brought up (RTC_BIT_FIRST_PON set).
+	 * The RTC clock is already on when this image did not come up from a cold
+	 * boot: a reset that leaves the always-on domain standing (the watchdog, a
+	 * software reset) keeps it enabled. Everything below has been done once and
+	 * must not be repeated -- but the system timer (TIM0, which SYSTIMER_TickGet()
+	 * and the PM code's sleep-time recovery read) lives in the AP domain and comes
+	 * out of such a reset stopped, so it does have to be started again. Left to
+	 * the shortcut alone it stays at 0 for the rest of the boot, and since nothing
+	 * else starts it, the kernel clock silently stops advancing across every
+	 * sleep.
+	 *
+	 * This mirrors what the SDK does with two branches rather than one function:
+	 * ameba_app_start.c starts the system timer from app_start() when OSC131 is
+	 * already up (RTC_BIT_FIRST_PON set), and from the RTC_DET_IRQ handler
+	 * rtc_irq_init() on a cold boot, where it is not.
 	 */
 	if (RCC_PeriphClockEnableChk(APBPeriph_RTC_CLOCK)) {
+		SDM32K_Enable();
+		SYSTIMER_Init();
 		return 0;
 	}
 

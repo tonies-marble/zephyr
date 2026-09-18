@@ -6,7 +6,6 @@
 
 / {
 	aliases {
-		pwm-0 = &pwm0;
 		pwm-test = &pwm0;
 	};
 };
@@ -14,7 +13,5 @@
 &pwm0 {
 	pinctrl-0 = <&pwm0_default>;
 	pinctrl-names = "default";
-	prescale = <39>;
-	channel-count = <8>;
 	status = "okay";
 };

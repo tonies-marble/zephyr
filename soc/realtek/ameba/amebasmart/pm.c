@@ -29,7 +29,10 @@
 #ifdef CONFIG_SMP
 #include <zephyr/arch/cpu.h>
 #include <zephyr/drivers/pm_cpu_ops.h>
+#include <zephyr/drivers/timer/system_timer_lpm.h>
 #include <zephyr/platform/hooks.h>
+
+#include "../common/ameba_lpm_timer.h"
 #endif
 
 LOG_MODULE_REGISTER(soc_pm, LOG_LEVEL_DBG);
@@ -42,10 +45,81 @@ LOG_MODULE_REGISTER(soc_pm, LOG_LEVEL_DBG);
 extern SLEEP_ParamDef sleep_param;
 extern void SOCPS_SleepPG_LIB(void);
 
-/* arm_arch_timer.c: re-base the system-tick accounting after power-gating has
- * reset the CA32 generic-timer counter, announcing the elapsed sleep ticks.
+/*
+ * Elapsed-time reference across a cluster power-gate. Nothing on the CA32 side
+ * survives it -- the arch timer is reset with the cluster -- so the gated duration
+ * has to come from the always-on ameba system timer (TIM0, 32768 Hz), which is what
+ * the hal's CA32 PM code reads for the same purpose (pmu_post_sleep_processing()).
+ * TIM0 is only ever read here: it is also the only basic timer on this SoC with a
+ * wakeup-source-id, and handing it to the counter driver instead reprograms and
+ * stops it, which is why the PM test keeps the node disabled and wakes from the rtc.
+ *
+ * This is the system timer's low-power companion, in the CONFIG_SYSTEM_TIMER_LPM_
+ * COMPANION_HOOKS sense: the arch timer hands timekeeping over on the way into the
+ * gate and asks for the elapsed time on the way out. The sampling itself is shared
+ * with the Cortex-M path, in common/ameba_lpm_timer.c.
+ *
+ * Note that arming the wake and measuring the sleep stay separate concerns. The AON
+ * timer below bounds how long the AP may stay down; TIM0 says how long it actually
+ * was, which is not the same number whenever something else -- an rtc alarm, a gpio
+ * -- ends the sleep first.
  */
-extern void sys_clock_arm_arch_timer_pm_resync(uint32_t elapsed_ticks);
+
+/*
+ * Deadline for the LP core to arm its AON timer from, in milliseconds, or
+ * PMU_SLEEP_FOREVER for "do not arm". Written by z_sys_clock_lpm_enter() and read
+ * where sleep_param is filled in -- here for the power-gate and in ameba_pmc.c for
+ * the clock-gate, which is why it is not static.
+ *
+ * Consumed as it is read, because the companion hook is not called for every sleep:
+ * the kernel skips it entirely when it has no timeout pending (K_TICKS_FOREVER), and
+ * a deadline left behind from the previous sleep would then cut that one short.
+ */
+uint32_t amebasmart_lpm_deadline_ms = PMU_SLEEP_FOREVER;
+
+/*
+ * Upper bound on the deadline handed to the LP core. It reaches AONTimer_Setting(),
+ * which scales milliseconds by 100 into a 32-bit counter clocked at 100 kHz, so the
+ * field runs out a bit under 12 hours in. Round down to 8 h and treat anything
+ * longer as "no deadline" -- which is what the kernel means by a timeout that far
+ * out anyway.
+ */
+#define AMEBA_AON_WAKE_MAX_MS (8U * 60U * 60U * 1000U)
+
+void z_sys_clock_lpm_enter(uint64_t max_lpm_time_us)
+{
+	uint64_t deadline_ms = max_lpm_time_us / USEC_PER_MSEC;
+
+	ameba_lpm_timer_mark_entry();
+
+	/*
+	 * Publish the deadline the kernel is idling to, for the LP core to arm its
+	 * AON timer from: ap_suspend() calls ap_wakeup_timer_init(sleep_time) for
+	 * anything other than PMU_SLEEP_FOREVER, which enables WAKE_SRC_AON_TIM and
+	 * programs it in milliseconds. So a sleep ends on time whether or not the
+	 * application armed a wake source of its own.
+	 *
+	 * PMU_SLEEP_FOREVER is the encoding for "do not arm", and it is what a
+	 * deadline too far out to express falls back to. 0 is not usable as that
+	 * sentinel -- AONTimer_Setting() returns early on it, leaving the AP gated
+	 * with the wake event enabled but the timer never programmed -- so a
+	 * sub-millisecond deadline is rounded up to 1 ms instead.
+	 */
+	if (deadline_ms == 0U) {
+		deadline_ms = 1U;
+	}
+
+	if (deadline_ms <= AMEBA_AON_WAKE_MAX_MS) {
+		amebasmart_lpm_deadline_ms = (uint32_t)deadline_ms;
+	} else {
+		amebasmart_lpm_deadline_ms = PMU_SLEEP_FOREVER;
+	}
+}
+
+uint64_t z_sys_clock_lpm_exit(void)
+{
+	return ameba_lpm_timer_elapsed_us();
+}
 
 #ifdef CONFIG_SMP
 /* Secondary-core register save/restore across cluster PG (lib_pmc.a): a
@@ -57,7 +131,7 @@ extern void __start(void); /* secondary cold-boot entry (arch reset vector) */
 
 /* Secondary-core (CPU1) power-gating state machine. The CPU1_RUNNING /
  * CPU1_HOTPLUG / CPU1_WAKE_FROM_PG enumerators come from the HAL
- * (ameba_pmu.h) and match the FreeRTOS SDK values (0/1/2).
+ * (ameba_pmu.h) and match the values the hal uses (0/1/2).
  */
 volatile int amebasmart_cpu1_state = CPU1_RUNNING;
 
@@ -78,8 +152,8 @@ volatile int amebasmart_cpu1_state = CPU1_RUNNING;
  * Zephyr calls pm_state_set() on every idle CPU, so under SMP both CA32 cores
  * reach it.  Only CPU0 drives the SoC sleep; CPU1 parks itself in WFE (clock
  * still fed) and CPU0 releases it with SEV on wake — the clock-gating (CG)
- * model, which needs no core power-off (mirrors the FreeRTOS ARM_CA32 SMP
- * idle hook, vPortSMPSuppressTicksAndSleep, CG path).
+ * model, which needs no core power-off (mirrors the hal's ARM_CA32 SMP idle
+ * hook, vPortSMPSuppressTicksAndSleep, CG path).
  */
 static volatile uint8_t cpu1_parked;
 static volatile uint8_t cpu1_release;
@@ -120,7 +194,7 @@ static void soc_cpu1_release(void)
 #define CPU1_MPID 1
 
 /*
- * Secondary-core power-gating (CPU hotplug), mirroring the FreeRTOS SDK
+ * Secondary-core power-gating (CPU hotplug), mirroring the hal's
  * vSMPSleepProcessing.  Zephyr AArch32 has no native CPU hotplug, so we use a
  * setjmp/longjmp trick: SOCPS_Backup_CPU1() records a resume return point, then
  * the core powers itself off (PSCI CPU_OFF).  After the cluster warm-boots,
@@ -205,12 +279,14 @@ static void soc_sleep_pg(void)
 #endif
 
 	sleep_param.sleep_type = SLEEP_PG;
-	/* PMU_SLEEP_FOREVER: the LP core must NOT arm an AON wake timer — the AP
-	 * sleeps until a configured wake event (rtc/counter/gpio) fires. sleep_time=0
-	 * makes the LP wake the AP almost immediately (ap_wakeup_timer_init(0)),
-	 * producing an enter/exit spin instead of a real sleep.
+	/* The kernel's idle deadline, for the LP core to arm its AON wake timer from,
+	 * or PMU_SLEEP_FOREVER to leave it unarmed and sleep until a configured wake
+	 * event (rtc/counter/gpio) fires. Never 0: that makes the LP wake the AP almost
+	 * immediately (ap_wakeup_timer_init(0) -> AONTimer_Setting(0), which programs
+	 * nothing), producing an enter/exit spin instead of a real sleep.
 	 */
-	sleep_param.sleep_time = PMU_SLEEP_FOREVER;
+	sleep_param.sleep_time = amebasmart_lpm_deadline_ms;
+	amebasmart_lpm_deadline_ms = PMU_SLEEP_FOREVER;
 	sleep_param.dlps_enable = DISABLE;
 	DCache_CleanInvalidate((u32)&sleep_param, sizeof(SLEEP_ParamDef));
 
@@ -223,25 +299,6 @@ static void soc_sleep_pg(void)
 	SOCPS_SleepPG_LIB();
 
 	RTK_LOGS(NOTAG, RTK_LOG_INFO, "APPW\n");
-
-	/*
-	 * Power-gating resets the CA32 ARM generic timer (the Zephyr system tick
-	 * counter) back to ~0.  Re-base the arch-timer driver's cycle/tick
-	 * accounting onto the reset counter so the tickless kernel keeps getting
-	 * ticks and its clock neither hangs nor jumps (the driver's last_cycle
-	 * would otherwise underflow against the reset counter).
-	 *
-	 * elapsed_ticks is 0: the powered-down duration is NOT added to kernel
-	 * time.  Every CA32-side time source is unusable across PG — the arch
-	 * timer and TIM0/SYSTIMER/debug timer are all in AP/LS domains that gate
-	 * during PG, and the RTC calendar does not free-run in this path.  The
-	 * only component that knows the true PG duration is KM0 (the PM master);
-	 * accounting for slept time would require it to report the duration back
-	 * over IPC on wake.  Kernel time therefore stays monotonic and stable
-	 * across PG but does not advance during the gated interval (matching the
-	 * FreeRTOS CA32 port, whose PG tick compensation is likewise a TODO).
-	 */
-	sys_clock_arm_arch_timer_pm_resync(0);
 
 #ifdef CONFIG_SMP
 	/* Cluster is back and CPU0 has restored its own state. Re-start CPU1
@@ -272,7 +329,7 @@ static void soc_sleep_pg(void)
 	}
 
 	/* Flag the AP restart to the LP (KM0) core so it re-arms the PG
-	 * handshake for the next cycle (matches FreeRTOS SOCPS_SleepPG). Without
+	 * handshake for the next cycle (matches the hal's SOCPS_SleepPG). Without
 	 * this the second cluster PG is never woken.  Bit is not in the Zephyr
 	 * HAL header (sysreg_lsys.h): LSYS_BIT_AP_RST_WAIT_DRAM = (1 << 1).
 	 */
@@ -322,7 +379,10 @@ void pm_state_exit_post_ops(enum pm_state state, uint8_t substate_id)
 	ARG_UNUSED(state);
 	ARG_UNUSED(substate_id);
 
-	/* Re-enable interrupts so the wake-source ISR can run. */
+	/* Re-enable interrupts so the wake-source ISR can run. The kernel skips its
+	 * own idle processing when a state was entered, so this hook owns it (see the
+	 * comment on pm_system_suspend() in kernel/idle.c).
+	 */
 	irq_unlock(0);
 }
 
@@ -360,6 +420,7 @@ static void soc_pin_spis_to_cpu0(void)
 
 static int ameba_universal_wakeup_init(void)
 {
+
 #ifdef CONFIG_SMP
 	soc_pin_spis_to_cpu0();
 #endif

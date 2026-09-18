@@ -23,6 +23,9 @@ properties:
     type: int
     required: true
 
+  # The timing properties below are raw LEDC register counts, not nanoseconds.
+  # Per the LEDC register spec each count is one 40 MHz tick (25 ns).
+
   wait-data-timeout:
     type: int
     required: true
@@ -50,3 +53,13 @@ properties:
   color-mapping:
     type: array
     required: true
+
+  dmas:
+    description: |
+      Optional TX DMA channel specifier, used only when CONFIG_LEDC_AMEBA_DMA
+      is enabled. Format: <&dma channel slot config>, where "slot" is the
+      LEDC TX handshake index (SoC specific) and "config" is the packed Ameba
+      GDMA config cell (see realtek,ameba-gdma binding). Name it "tx".
+
+  dma-names:
+    description: Name of the DMA channel specifier, must be "tx".

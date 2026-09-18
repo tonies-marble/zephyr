@@ -1,0 +1,38 @@
+/*
+ * Copyright (c) 2026 Realtek Semiconductor Corp.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <zephyr/dt-bindings/pwm/pwm.h>
+
+/ {
+	aliases {
+		pwm-led0 = &pwm_led0;
+	};
+
+	pwmleds {
+		compatible = "pwm-leds";
+
+		pwm_led0: pwm_led_0 {
+			pwms = <&pwm0 0 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
+			label = "PWM LED0";
+		};
+	};
+};
+
+&pinctrl {
+	pwm0_led: pwm0_led {
+		group1 {
+			/* TIM8 channel 0 -> PA12, the on-board LED (same pin blinky uses) */
+			pinmux = <AMEBA_PINMUX('A', 12, AMEBA_PWM)>;
+			bias-pull-up;
+		};
+	};
+};
+
+&pwm0 {
+	pinctrl-0 = <&pwm0_led>;
+	pinctrl-names = "default";
+	status = "okay";
+};

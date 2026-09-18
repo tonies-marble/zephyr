@@ -21,18 +21,31 @@
  * must declare them too: without them its pm_policy returns NULL, it never
  * parks or hotplugs off, and CPU0 hot-spins waiting for it instead of
  * cluster-power-gating.
+ *
+ * Suspend-to-RAM only, deliberately. Clock-gating is offered by the SoC's
+ * devicetree but does not come back on this SoC -- the NP takes a SecureFault
+ * (attribution unit violation) while the AP is gated -- and the residency policy
+ * would pick it for any idle window between 5.0 and 7.5 ms, taking the run down
+ * at a point unrelated to whatever case was executing.
  */
 &cpu0 {
-	cpu-power-states = <&pm_cg &pm_pg>;
+	cpu-power-states = <&pm_pg>;
 };
 
 &cpu1 {
-	cpu-power-states = <&pm_cg &pm_pg>;
+	cpu-power-states = <&pm_pg>;
 };
 
 / {
+	/*
+	 * No pm-wake-counter here. TIMER0 is TIM0, the always-on reference the PM
+	 * tick recovery reads, and on this SoC it is also the only basic timer with a
+	 * wakeup-source-id -- the two uses are mutually exclusive, and the reference
+	 * wins: handing the node to the counter driver reprograms and stops it (the
+	 * hal's CA32 PM code likewise keeps TIM0 to itself and wakes from rtc/gpio).
+	 * The cases that need an armable wake source use the rtc instead.
+	 */
 	aliases {
-		pm-wake-counter = &timer0;
 		pm-wake-gpio = &gpiob;
 	};
 };
@@ -43,11 +56,6 @@
 };
 
 &gpiob {
-	status = "okay";
-	wakeup-source;
-};
-
-&timer0 {
 	status = "okay";
 	wakeup-source;
 };

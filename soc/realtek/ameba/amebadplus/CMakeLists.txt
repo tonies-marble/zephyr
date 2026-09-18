@@ -16,7 +16,8 @@ if(CONFIG_MCUBOOT)
   zephyr_sources(${CMAKE_CURRENT_LIST_DIR}/../common/mcuboot_action_hook.c)
 else()
   zephyr_sources(soc.c)
-  zephyr_library_sources_ifdef(CONFIG_PM ${CMAKE_CURRENT_LIST_DIR}/../common/pm.c)
+  zephyr_library_sources_ifdef(CONFIG_PM ${CMAKE_CURRENT_LIST_DIR}/../common/pm.c
+                               ${CMAKE_CURRENT_LIST_DIR}/../common/ameba_lpm_timer.c)
 endif()
 
 zephyr_linker_sources(RAMFUNC_SECTION ${CMAKE_CURRENT_LIST_DIR}/../common/ram_function_section.ld)

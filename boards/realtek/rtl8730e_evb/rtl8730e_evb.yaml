@@ -28,3 +28,4 @@ supported:
   - adc
   - entropy
   - smp
+  - pwm

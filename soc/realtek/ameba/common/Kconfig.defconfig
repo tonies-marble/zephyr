@@ -1,0 +1,28 @@
+# Copyright (c) 2026 Realtek Semiconductor Corp.
+# SPDX-License-Identifier: Apache-2.0
+
+# Every ameba SoC loses its system timer across a sleep -- the Cortex-M ones stop
+# SysTick (clock-gating takes the core clock away, power-gating takes the core),
+# and on the CA32 the generic timer's counter comes back from reset with the
+# cluster. So the driver has to restart it and reconstruct the elapsed time on
+# wake, which is what these two say.
+#
+# Hooks rather than the Counter API variant on all of them, because the reference
+# is the always-on ameba system timer (TIM0) and it is only ever read: a companion
+# device would additionally be armed and reprogrammed each idle, and TIM0 cannot
+# serve as both the reference and that. It is also, on some of these SoCs, the only
+# basic timer wired to the wake logic, so handing it to the counter driver would
+# stop the very thing being read.
+#
+# The hooks themselves live with each SoC's sleep entry: common/pm.c for the
+# Cortex-M SoCs, amebasmart/pm.c for the CA32.
+#
+# Guarded on PM rather than per SoC: no ameba SoC keeps its system timer across a
+# sleep, and a target built without CONFIG_PM never sleeps in the first place.
+
+choice SYSTEM_TIMER_LPM_COMPANION
+	default SYSTEM_TIMER_LPM_COMPANION_HOOKS if PM
+endchoice
+
+config SYSTEM_TIMER_RESET_BY_LPM
+	default y if PM

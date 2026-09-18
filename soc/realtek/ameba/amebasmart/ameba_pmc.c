@@ -22,10 +22,22 @@ SLEEP_ParamDef sleep_param ALIGNMTO(32);
 /* clock-gate the CA32 (hand off to LP over IPC, gate the clock) — lib_pmc.a. */
 extern void SOCPS_SleepCG_LIB(void);
 
+/* The kernel's idle deadline in milliseconds, or PMU_SLEEP_FOREVER (pm.c). */
+extern uint32_t amebasmart_lpm_deadline_ms;
+
 void SOCPS_SleepCG(void)
 {
 	sleep_param.sleep_type = SLEEP_CG;
-	sleep_param.sleep_time = 0; /* wake purely by configured wake events */
+	/*
+	 * The LP core reads this and arms an AON wake timer for any value other than
+	 * PMU_SLEEP_FOREVER (ap_suspend() in the hal's ameba_lpcap.c), which is how the
+	 * kernel's idle deadline reaches hardware here. Never 0: that means "wake me
+	 * immediately" rather than "wake me only on a configured event" -- the AP is
+	 * pulled back out before it has gated, and the enter/exit spin that follows
+	 * takes the NP down with it.
+	 */
+	sleep_param.sleep_time = amebasmart_lpm_deadline_ms;
+	amebasmart_lpm_deadline_ms = PMU_SLEEP_FOREVER;
 	sleep_param.dlps_enable = DISABLE;
 	DCache_CleanInvalidate((u32)&sleep_param, sizeof(SLEEP_ParamDef));
 

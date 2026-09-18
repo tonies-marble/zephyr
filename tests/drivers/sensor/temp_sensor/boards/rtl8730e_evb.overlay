@@ -4,14 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/ {
-	aliases {
-		pwm-test = &pwm0;
-	};
-};
-
-&pwm0 {
-	pinctrl-0 = <&pwm0_default>;
-	pinctrl-names = "default";
+temp_sensor: &coretemp {
 	status = "okay";
 };

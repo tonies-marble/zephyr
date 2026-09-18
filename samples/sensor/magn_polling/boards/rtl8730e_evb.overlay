@@ -1,0 +1,50 @@
+/*
+ * Copyright (c) 2026 Realtek Semiconductor Corp.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
+ * BMM150 geomagnetic sensor on i2c1, used to exercise the Ameba I2C master
+ * driver against a real I2C peripheral.
+ *
+ * Wiring (BMM150 module <-> rtl8730e_evb header J10):
+ *   SDA (PA3, J10.11) <-> module SDA
+ *   SCL (PA4, J10.12) <-> module SCL
+ *   3V3               <-> module VCC
+ *   GND               <-> module GND
+ *
+ * This particular BMM150 module answers at I2C address 0x13 (address pins
+ * strapped), confirmed with `i2c read_byte`.
+ *
+ * PA3/PA4 are the fixed SDA/SCL pair of the I2C1 controller (see
+ * i2c_index_get() in the Ameba HAL) and are plain digital pads outside the
+ * audio-shared (APAD) range, so they work as digital I2C on this part.
+ */
+
+/ {
+	aliases {
+		magn0 = &bmm150;
+	};
+};
+
+&pinctrl {
+	i2c1_pa3_pa4: i2c1_pa3_pa4 {
+		group1 {
+			pinmux = <AMEBA_PINMUX('A', 3, AMEBA_I2C)>,  /* SDA */
+				 <AMEBA_PINMUX('A', 4, AMEBA_I2C)>;  /* SCL */
+			bias-pull-up;
+		};
+	};
+};
+
+&i2c1 {
+	pinctrl-0 = <&i2c1_pa3_pa4>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	bmm150: bmm150@13 {
+		compatible = "bosch,bmm150";
+		reg = <0x13>;
+	};
+};

@@ -493,6 +493,7 @@
 			index = <0>;
 			#pwm-cells = <3>;
 			channel-count = <4>;
+			prescale = <39>;
 			status = "disabled";
 		};
 
@@ -505,6 +506,7 @@
 			index = <1>;
 			#pwm-cells = <3>;
 			channel-count = <4>;
+			prescale = <39>;
 			status = "disabled";
 		};
 
@@ -517,6 +519,7 @@
 			index = <2>;
 			channel-count = <4>;
 			#pwm-cells = <3>;
+			prescale = <39>;
 			status = "disabled";
 		};
 
@@ -529,6 +532,7 @@
 			index = <3>;
 			channel-count = <4>;
 			#pwm-cells = <3>;
+			prescale = <39>;
 			status = "disabled";
 		};
 

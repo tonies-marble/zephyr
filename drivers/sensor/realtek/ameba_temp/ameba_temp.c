@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022 Espressif Systems (Shanghai) Co., Ltd.
+ * Copyright (c) 2026 Realtek Semiconductor Corp.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -19,46 +19,47 @@
 LOG_MODULE_REGISTER(ameba_temp, CONFIG_SENSOR_LOG_LEVEL);
 
 struct ameba_temp_data {
-	struct k_mutex mutex;
-	float c_temp; /* Celsius degree of float type */
+	struct k_mutex mutex; /* serializes access to c_temp */
+	float c_temp;         /* Celsius degree of float type */
 };
 
 static int ameba_temp_sample_fetch(const struct device *dev, enum sensor_channel chan)
 {
-	(void)chan;
 	struct ameba_temp_data *data = dev->data;
-	u32 tm;
-	int rc = 0;
+	uint32_t tm;
 
-	k_mutex_lock(&data->mutex, K_FOREVER);
-
-	tm = TM_GetTempResult();
-
-	if (tm != TM_INVALID_VALUE) {
-		data->c_temp = TM_GetCdegree(tm);
-	} else {
-		LOG_ERR("Temperature read error!");
-		rc = -EFAULT;
-		goto unlock;
+	if (chan != SENSOR_CHAN_ALL && chan != SENSOR_CHAN_DIE_TEMP) {
+		return -ENOTSUP;
 	}
 
-unlock:
+	tm = TM_GetTempResult();
+	if (tm == TM_INVALID_VALUE) {
+		LOG_ERR("failed to read temperature");
+		return -EIO;
+	}
+
+	k_mutex_lock(&data->mutex, K_FOREVER);
+	data->c_temp = TM_GetCdegree(tm);
 	k_mutex_unlock(&data->mutex);
 
-	return rc;
+	return 0;
 }
 
 static int ameba_temp_channel_get(const struct device *dev, enum sensor_channel chan,
 				  struct sensor_value *val)
 {
 	struct ameba_temp_data *data = dev->data;
+	int rc;
 
-	if (chan != SENSOR_CHAN_ALL && chan != SENSOR_CHAN_DIE_TEMP &&
-	    chan != SENSOR_CHAN_AMBIENT_TEMP) {
+	if (chan != SENSOR_CHAN_DIE_TEMP) {
 		return -ENOTSUP;
 	}
 
-	return sensor_value_from_float(val, data->c_temp);
+	k_mutex_lock(&data->mutex, K_FOREVER);
+	rc = sensor_value_from_float(val, data->c_temp);
+	k_mutex_unlock(&data->mutex);
+
+	return rc;
 }
 
 static DEVICE_API(sensor, ameba_temp_driver_api) = {
@@ -81,8 +82,6 @@ static int ameba_temp_init(const struct device *dev)
 	TM_HighPtConfig(0x0, DISABLE);
 	TM_HighWtConfig(0x0, DISABLE);
 	TM_LowWtConfig(0x0, DISABLE);
-
-	LOG_DBG("Thermal init ok.");
 
 	return 0;
 }

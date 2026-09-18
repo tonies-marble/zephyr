@@ -28,25 +28,15 @@
  *     and over-reporting (the ROM's SYSTIMER_GetPassTick() taking a reset
  *     counter for a wrapped one and crediting ~2^32 ticks).
  *
- * Arming a wake source is not optional on this hardware. The residency the
- * kernel asks for never reaches the ameba PMC (sleep_param.sleep_time comes
- * from pmu_get_sleep_time() on the Cortex-M SoCs and is PMU_SLEEP_FOREVER on
- * AmebaSmart), so a power-gated AP with no wake source armed simply never comes
- * back.
+ * The residency the kernel idles to reaches hardware on every target, so an idle
+ * k_msleep() comes back on its own: the ameba PMC owns a wake timer on the Cortex-M
+ * SoCs, and on AmebaSmart the LP core arms an AON timer from the sleep time the AP
+ * publishes. test_kernel_deadline_ends_the_sleep checks exactly that, with no wake
+ * source armed by anyone.
  *
- * The blocking is done on a semaphore the wake callback gives, not on a kernel
- * timeout. A timeout is only satisfied if the kernel clock recovers the time
- * spent powered down, and that is a property under test here -- on AmebaSmart it
- * deliberately does not hold (see PM_CREDITS_GATED_TIME). Where it does not,
- * waiting on a timeout would leave the thread short of its deadline after the
- * wake, so it would idle again with the one-shot alarm already consumed and the
- * AP would power down for good.
- *
- * Note that the per-test durations ztest prints are not usable here: they come
- * from the cycle counter, which the power-down resets (SysTick-derived on the
- * Cortex-M SoCs, the ARM generic timer on AmebaSmart), so they are meaningless
- * -- ~0 on the Cortex-M targets and tens of seconds on AmebaSmart regardless of
- * how long the sleep was. The uptime stamps in the log are the ones to read.
+ * The wake-source cases nevertheless block on a semaphore their callback gives
+ * rather than on a kernel timeout, so that each one proves its own source ended
+ * the sleep rather than the kernel's deadline doing it.
  */
 
 #include <ameba_soc.h>
@@ -74,6 +64,16 @@
 /* ------------------------------------------------- build-time invariants */
 
 BUILD_ASSERT(IS_ENABLED(CONFIG_PM), "these tests only mean anything with CONFIG_PM");
+
+/*
+ * Whether this target has a basic timer to spare as an armable wake source, i.e.
+ * whether its boards/<soc>_wake_sources.dtsi defines the pm-wake-counter alias.
+ * The Cortex-M SoCs do (amebag2 timer1, amebadplus timer4) and the counter case
+ * plus the assertions below apply there. AmebaSmart does not: TIMER0 is the PM
+ * timebase and also the only wake-capable basic timer, so everything that needs
+ * the alias is left out there rather than pointed at TIMER0.
+ */
+#define PM_HAS_WAKE_COUNTER DT_NODE_EXISTS(DT_ALIAS(pm_wake_counter))
 
 /*
  * The idle path only suspends a CPU that declares idle states. On AmebaSmart
@@ -104,7 +104,9 @@ BUILD_ASSERT(DT_NODE_HAS_PROP(DT_PATH(cpus, cpu_1), cpu_power_states),
 	BUILD_ASSERT(DT_NODE_HAS_PROP(node_id, wakeup_source_id),                                  \
 		     name " carries no wakeup-source-id, so there is no PMC wake event to enable")
 
+#if PM_HAS_WAKE_COUNTER
 ASSERT_ARMABLE_WAKE_SOURCE(DT_ALIAS(pm_wake_counter), "the pm-wake-counter");
+#endif
 ASSERT_ARMABLE_WAKE_SOURCE(DT_NODELABEL(rtc), "the rtc");
 
 #if !defined(CONFIG_SOC_SERIES_AMEBASMART)
@@ -130,9 +132,11 @@ BUILD_ASSERT(IS_ENABLED(CONFIG_BOOTLOADER_MCUBOOT) || IS_ENABLED(CONFIG_TFM_BL2)
 BUILD_ASSERT(!DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(timer0)),
 	     "TIMER0 is the ameba system timebase the PM tick recovery reads, not a spare "
 	     "counter: enabling the node stops it");
+#if PM_HAS_WAKE_COUNTER
 BUILD_ASSERT(!DT_SAME_NODE(DT_ALIAS(pm_wake_counter), DT_NODELABEL(timer0)),
 	     "pm-wake-counter must not be TIMER0 (see above); use one of the wake-capable "
 	     "basic timers instead");
+#endif
 
 /*
  * Which SRAM window the image runs out of is the layout invariant that took the
@@ -167,33 +171,40 @@ BUILD_ASSERT(DT_SAME_NODE(DT_CHOSEN(zephyr_sram), DT_NODELABEL(sram0)),
 #define CREDIT_MAX_MS (WAKE_MS + 1000)
 
 /*
- * Failure guard only, not a deadline: it bounds the wait if a wake source never
- * fires at all. Note that on a power-gated AP the kernel clock is not running
- * either, so this can only expire once the AP is back -- a wake source that
- * never fires still hangs the run rather than failing it.
+ * Failure guard only, not the deadline under test: it bounds the wait if a wake
+ * source never fires at all. It is itself a kernel deadline, so where one reaches
+ * hardware (PM_KERNEL_DEADLINE_WAKES) it ends the sleep and the case fails on the
+ * zassert_ok() below rather than hanging the run.
  */
 #define WAKE_TIMEOUT_MS (WAKE_MS + 4000)
 
 #if defined(CONFIG_SOC_SERIES_AMEBASMART)
 /*
- * AmebaSmart differs from the Cortex-M SoCs in two ways the assertions have to
- * allow for:
+ * AmebaSmart differs from the Cortex-M SoCs in ways the assertions have to allow
+ * for. The kernel clock itself is not one of them any more: the ARM generic timer
+ * is reset with the cluster, but it is the system timer's low-power companion --
+ * TIM0, read from soc/realtek/ameba/amebasmart/pm.c -- that reports the gated
+ * duration, and the driver repairs both accumulators from it, so the same credit
+ * bounds apply here as everywhere else.
  *
- * - The kernel clock does not advance across power-gating. Nothing on the CA32
- *   side survives PG -- the ARM generic timer, TIM0/SYSTIMER and the debug timer
- *   all gate with the AP domain, and the RTC calendar does not free-run on this
- *   path -- so only KM0 knows how long the gate lasted, and
- *   soc/realtek/ameba/amebasmart/pm.c re-bases the arch timer with zero elapsed
- *   ticks on purpose. Only the upper bound is checked there.
  * - Under SMP, CPU0 must not sleep until CPU1 has parked in WFE (CG) or powered
  *   itself off (PG); until then it abandons the attempt and the idle loop
  *   retries, so one sleep can be announced as several enter/exit pairs.
  */
-#define PM_CREDITS_GATED_TIME    0
+#define PM_CREDITS_GATED_TIME    1
 #define PM_ONE_ATTEMPT_PER_SLEEP 0
+/*
+ * Clock-gating is left out on AmebaSmart: forcing it makes the NP take a
+ * SecureFault while the AP is gated (see solutions/amebasmart-pm), so an
+ * enabled case here would take the run down rather than fail.
+ */
+#define PM_COVERS_CLOCK_GATE     0
+#define PM_KERNEL_DEADLINE_WAKES 1
 #else
 #define PM_CREDITS_GATED_TIME    1
 #define PM_ONE_ATTEMPT_PER_SLEEP 1
+#define PM_COVERS_CLOCK_GATE     1
+#define PM_KERNEL_DEADLINE_WAKES 1
 #endif
 
 /* The ameba system timer (TIM0) runs off the 32.768 kHz always-on domain. */
@@ -351,9 +362,19 @@ static void notify_pm_state_entry(enum pm_state state)
 	}
 }
 
+/*
+ * Counted only against an entry this run has already seen. The two notifications
+ * bracket a sleep but the counters are zeroed between cases, so an exit can arrive
+ * for a sleep whose entry was cleared -- the case that was waiting on that sleep
+ * resumes when the system timer hands the slept time back, which the kernel does
+ * after the exit notification, so the case can be into the next reset before the
+ * secondary CPU has run its own notifiers. Ignoring the unpaired ones keeps
+ * "entered N times, left N times" a statement about this run's sleeps.
+ */
 static void notify_pm_state_exit(enum pm_state state)
 {
-	if (pm_on_sleep_driving_cpu()) {
+	if (pm_on_sleep_driving_cpu() &&
+	    atomic_get(&exit_count[state]) < atomic_get(&entry_count[state])) {
 		atomic_inc(&exit_count[state]);
 	}
 }
@@ -467,9 +488,12 @@ static void pm_expect_sleep_cycle(enum pm_state state)
 
 /* ---------------------------------------------------------------- wake sources */
 
+#if PM_HAS_WAKE_COUNTER
 static const struct device *const counter_dev = DEVICE_DT_GET(DT_ALIAS(pm_wake_counter));
+#endif
 static const struct device *const rtc_dev = DEVICE_DT_GET(DT_NODELABEL(rtc));
 
+#if PM_HAS_WAKE_COUNTER
 static void counter_wake_cb(const struct device *dev, uint8_t chan, uint32_t ticks, void *user)
 {
 	ARG_UNUSED(chan);
@@ -499,6 +523,7 @@ static void counter_wake_arm(void)
 	zassert_ok(counter_set_channel_alarm(counter_dev, 0, &cfg));
 	zassert_ok(counter_start(counter_dev));
 }
+#endif /* PM_HAS_WAKE_COUNTER */
 
 static void rtc_wake_cb(const struct device *dev, uint16_t id, void *user)
 {
@@ -549,15 +574,6 @@ static void rtc_wake_arm(void)
 
 /* ---------------------------------------------------------------------- tests */
 
-/*
- * TODO: suspend-to-idle (clock-gate) is not covered yet. Forcing it by locking
- * suspend-to-RAM out of the policy leaves the AP in SOCPS_SleepCG() with no way
- * back -- the armed wake source does not bring it out and the watchdog resets
- * the chip about a second later. Every path exercised so far, here and in
- * applications/mcuboot_pm_system_manage, has gone through suspend-to-RAM, so
- * this looks untested rather than broken by something recent.
- */
-
 #if PM_CREDITS_GATED_TIME
 /*
  * The always-on reference on its own, with no power-down involved: TIM0 must be
@@ -586,13 +602,121 @@ ZTEST(realtek_pm, test_ameba_system_timebase_runs)
 				  "the PM code assumes",
 				  elapsed_ms, wait_us / 1000U);
 }
+
+#if defined(CONFIG_SOC_SERIES_AMEBAG2)
+/*
+ * The same reference, but entered the way a warm reset enters it. A reset that
+ * leaves the always-on domain standing -- the watchdog, a software reset -- comes
+ * back with the RTC clock still enabled and the system timer stopped with the AP
+ * domain, and SOC_OSC131_Enable() has to start the timer on that path too. It used
+ * to return early instead, which left TIM0 reading 0 for the rest of the boot: no
+ * fault, no log, just a kernel clock that stops advancing across every sleep and
+ * timeouts that never expire.
+ *
+ * Reproduced by putting the SoC in that state rather than by resetting the chip,
+ * which would restart the suite and trip the boot-count invariant. The timebase is
+ * restored before the assert so that a failure here does not take the sleeping
+ * cases with it.
+ *
+ * amebadplus has no equivalent of this function -- its system timer is started
+ * elsewhere -- and whether it survives a warm reset is unverified.
+ */
+extern u32 SOC_OSC131_Enable(void);
+
+ZTEST(realtek_pm, test_ameba_system_timebase_restarts_on_warm_boot)
+{
+	const uint32_t wait_us = 200000U;
+	uint32_t start;
+	uint32_t elapsed_ms;
+
+	zassert_true(RCC_PeriphClockEnableChk(APBPeriph_RTC_CLOCK),
+		     "the RTC clock is off, so this does not reproduce a warm boot");
+
+	RTIM_Cmd(TIM0, DISABLE);
+
+	SOC_OSC131_Enable();
+
+	start = SYSTIMER_TickGet();
+	k_busy_wait(wait_us);
+	elapsed_ms = (uint32_t)(((uint64_t)(SYSTIMER_TickGet() - start) * MSEC_PER_SEC) /
+				AMEBA_SYSTIMER_HZ);
+
+	SYSTIMER_Init();
+
+	zassert_between_inclusive(elapsed_ms, (wait_us / 2000U), (wait_us / 500U),
+				  "the ameba system timer advanced %u ms after the warm-boot entry "
+				  "path re-ran: that path leaves it stopped, so the kernel clock "
+				  "will not survive a sleep once the chip has been reset by "
+				  "anything short of a power cycle",
+				  elapsed_ms);
+}
+#endif /* CONFIG_SOC_SERIES_AMEBAG2 */
 #endif
 
+/*
+ * The kernel's own deadline has to end the sleep, with no wake source armed by
+ * anyone. This is what an ordinary k_msleep() over an idle system depends on, and
+ * for a long time it did not hold here: the residency the kernel idles to never
+ * reached the PMC, so whichever state the policy picked was entered and only a
+ * wake source the application had armed itself could end it -- an application that
+ * simply slept would gate the AP and never come back.
+ *
+ * Every sleeping state the chain supports, because the policy picks between them by
+ * how long the idle window is: 1 s clears both residencies, so each is forced in
+ * turn instead.
+ */
+#if PM_KERNEL_DEADLINE_WAKES
+ZTEST(realtek_pm, test_kernel_deadline_ends_the_sleep)
+{
+	static const enum pm_state states[] = {
+#if PM_COVERS_CLOCK_GATE
+		PM_STATE_SUSPEND_TO_IDLE,
+#endif
+		PM_STATE_SUSPEND_TO_RAM,
+	};
+
+	for (int i = 0; i < ARRAY_SIZE(states); i++) {
+		enum pm_state state = states[i];
+		int64_t start;
+		int64_t elapsed;
+		int entries;
+
+		pm_counters_reset();
+		pm_states_restrict_to(state);
+
+		start = k_uptime_get();
+		k_msleep(WAKE_MS);
+		elapsed = k_uptime_get() - start;
+
+		pm_states_unrestrict(state);
+		entries = (int)atomic_get(&entry_count[state]);
+
+		zassert_true(entries >= 1,
+			     "state %d was never entered, so the sleep proves nothing", state);
+		/*
+		 * Lower bound guards a deadline that fires early (a stale or
+		 * mis-scaled wake time), the upper one guards the deadline never
+		 * arriving and something else -- a stray interrupt, the log backend --
+		 * ending the sleep instead. Resume from a power-gate costs a couple of
+		 * hundred milliseconds on top, hence the asymmetry.
+		 */
+		zassert_between_inclusive((int)elapsed, WAKE_MS - 100, WAKE_MS + 600,
+					  "k_msleep(%d) took %d ms in state %d with no wake "
+					  "source armed",
+					  WAKE_MS, (int)elapsed, state);
+
+		pm_check_resume_invariants();
+	}
+}
+#endif
+
+#if PM_HAS_WAKE_COUNTER
 ZTEST(realtek_pm, test_suspend_to_ram_counter)
 {
 	counter_wake_arm();
 	pm_expect_sleep_cycle(PM_STATE_SUSPEND_TO_RAM);
 }
+#endif
 
 ZTEST(realtek_pm, test_suspend_to_ram_rtc)
 {
@@ -611,7 +735,11 @@ ZTEST(realtek_pm, test_suspend_to_ram_rtc)
 ZTEST(realtek_pm, test_suspend_to_ram_repeated)
 {
 	for (int i = 0; i < 3; i++) {
+#if PM_HAS_WAKE_COUNTER
 		counter_wake_arm();
+#else
+		rtc_wake_arm();
+#endif
 		pm_expect_sleep_cycle(PM_STATE_SUSPEND_TO_RAM);
 	}
 }

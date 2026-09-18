@@ -63,7 +63,8 @@ else()
   # backup/restore) are in lib_pmc.a (see the HAL CMakeLists).
   #   pm.c        - Zephyr PM hooks + PG/CG orchestration + SMP + wake sources
   #   ameba_pmc.c - SOCPS_SleepCG wrapper + sleep_param
-  zephyr_library_sources_ifdef(CONFIG_PM pm.c ameba_pmc.c)
+  zephyr_library_sources_ifdef(CONFIG_PM pm.c ameba_pmc.c
+                               ${CMAKE_CURRENT_LIST_DIR}/../common/ameba_lpm_timer.c)
 
   zephyr_linker_sources(RAM_SECTIONS SORT_KEY 0x0 boot_section.ld)
 

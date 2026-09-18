@@ -9,6 +9,9 @@
 #include <zephyr/irq.h>
 #include <zephyr/sys_clock.h>
 #include <zephyr/arch/cpu.h>
+#if !defined(CONFIG_SYSTEM_TIMER_LPM_COMPANION_NONE)
+#include <zephyr/drivers/timer/system_timer_lpm.h>
+#endif
 
 #ifdef CONFIG_TIMER_READS_ITS_FREQUENCY_AT_RUNTIME
 /* precompute CYC_PER_TICK at driver init to avoid runtime double divisions */
@@ -63,6 +66,25 @@ static uint64_t cycles_max;
 static uint64_t last_cycle;
 static uint64_t last_tick;
 static uint32_t last_elapsed;
+
+#if defined(CONFIG_SYSTEM_TIMER_RESET_BY_LPM)
+/*
+ * Running total of what the counter itself no longer accounts for, because a
+ * low-power mode placed it under reset. Added to every cycle-count read so that
+ * k_cycle_get_*() stays monotonic across such a mode instead of stepping back
+ * to ~0.
+ */
+static uint64_t cycles_lost_to_reset;
+#else
+#define cycles_lost_to_reset 0U
+#endif
+
+#if !defined(CONFIG_SYSTEM_TIMER_LPM_COMPANION_NONE)
+/* Set between handing timekeeping to the companion and taking it back. */
+static bool timeout_idle;
+/* Counter value when it was handed over, which a reset would otherwise lose. */
+static uint64_t cycle_pre_idle;
+#endif
 
 #if defined(CONFIG_TEST)
 const int32_t z_sys_timer_irq_for_test = ARM_ARCH_TIMER_IRQ;
@@ -137,6 +159,119 @@ static void arm_arch_timer_compare_isr(const void *arg)
 	sys_clock_announce_locked(delta_ticks, key);
 }
 
+#if !defined(CONFIG_SYSTEM_TIMER_LPM_COMPANION_NONE)
+/*
+ * Hand timekeeping to the low-power companion.
+ *
+ * Nothing is announced from here: sys_clock_set_timeout() is called with the
+ * timeout subsystem's lock held, so announcing would recurse on it. The counter
+ * value is only recorded, and sys_clock_idle_exit() announces everything at once.
+ *
+ * Under SMP the kernel idles each CPU separately, so this can run more than once
+ * before the state is actually entered, and each time re-opens the window: the
+ * counter reading is the one the CPU that got here last took, which is the closest
+ * to when the state was really entered.
+ */
+static void arch_timer_lpm_enter(uint64_t timeout_us)
+{
+	timeout_idle = true;
+	cycle_pre_idle = arm_arch_timer_count();
+
+	z_sys_clock_lpm_enter(timeout_us);
+}
+
+/*
+ * Take timekeeping back from the companion, which reports how long the low-power
+ * mode lasted.
+ *
+ * Without CONFIG_SYSTEM_TIMER_RESET_BY_LPM the counter kept running and already
+ * accounts for that time, so the ordinary paths cover it. With it, the counter came
+ * back from reset and two things have to be repaired.
+ *
+ * The accounting first: last_cycle and last_tick describe a counter that no longer
+ * exists, and the invariant last_cycle == last_tick * CYC_PER_TICK has to hold
+ * against the new one, or the next sys_clock_elapsed() underflows and
+ * sys_clock_set_timeout() programs a garbage compare. Both are re-based onto the
+ * post-reset counter and the timer is restarted.
+ *
+ * Then the time itself: what the counter had accumulated since the last announced
+ * tick before it was reset -- otherwise lost, and in a tickless system with no
+ * timeout pending that is the whole interval since the last announcement -- plus
+ * what the companion measured while it was down. It cannot be left for
+ * sys_clock_elapsed() to report, the way it would be on a platform whose counter
+ * merely stopped: a re-based last_cycle can only sit as far behind the counter as
+ * the counter has already run since its reset, which is a few ticks, while the owed
+ * time is however long the platform slept. So it is announced here, as
+ * cortex_m_systick does for the same reason.
+ *
+ * Announcing needs the calling CPU to be pinned, which is why this holds the timeout
+ * lock across it: k_spin_lock() locks interrupts, and a CPU with interrupts locked is
+ * not migratable (see z_smp_cpu_mobile()). The SoC's pm_state_exit_post_ops() has
+ * re-enabled them by the time the kernel calls this -- it is required to -- so
+ * announcing without the lock would be an assert away from a crash under SMP.
+ * sys_clock_announce_locked() takes the key and releases it, as the ISR above does.
+ */
+void sys_clock_idle_exit(void)
+{
+	uint64_t lpm_time_us;
+	uint64_t lpm_cycles;
+	uint32_t pre_idle_ticks;
+	uint32_t dticks;
+	k_spinlock_key_t key;
+	uint64_t curr_cycle;
+
+	/*
+	 * The same lock the ISR takes, because this touches the same accounting and
+	 * has the same reason to exclude other CPUs -- not merely local interrupts.
+	 * The kernel calls this on every CPU leaving the state, so under SMP the
+	 * claim below decides which one does the work, and a claim that is not
+	 * atomic across CPUs decides nothing: both would see the flag set, both
+	 * would ask the companion, and a provider measuring against a fixed
+	 * reference would report the same interval to each, crediting the state
+	 * twice over.
+	 */
+	key = sys_clock_lock();
+
+	if (!timeout_idle) {
+		sys_clock_unlock(key);
+		return;
+	}
+	timeout_idle = false;
+
+	lpm_time_us = z_sys_clock_lpm_exit();
+
+	if (!IS_ENABLED(CONFIG_SYSTEM_TIMER_RESET_BY_LPM)) {
+		sys_clock_unlock(key);
+		return;
+	}
+
+	lpm_cycles = (lpm_time_us * sys_clock_hw_cycles_per_sec()) / USEC_PER_SEC;
+
+	curr_cycle = arm_arch_timer_count();
+	pre_idle_ticks = (cycle_diff_t)(cycle_pre_idle - last_cycle) / CYC_PER_TICK;
+	dticks = pre_idle_ticks +
+		 (uint32_t)((lpm_time_us * CONFIG_SYS_CLOCK_TICKS_PER_SEC) / USEC_PER_SEC);
+
+	/*
+	 * The cycle count read cycles_lost_to_reset + cycle_pre_idle on the way in, so it has
+	 * to read at least that much plus the companion's measurement now.
+	 */
+	cycles_lost_to_reset += cycle_pre_idle + lpm_cycles - curr_cycle;
+
+	/* Re-based onto the counter that exists now, at a tick boundary. */
+	last_cycle = (curr_cycle / CYC_PER_TICK) * CYC_PER_TICK;
+	last_tick = last_cycle / CYC_PER_TICK;
+	last_elapsed = 0;
+
+	arm_arch_timer_set_compare(last_cycle + CYC_PER_TICK);
+	arm_arch_timer_enable(true);
+	arm_arch_timer_set_irq_mask(false);
+
+	/* Releases the lock. */
+	sys_clock_announce_locked((int32_t)dticks, key);
+}
+#endif /* !CONFIG_SYSTEM_TIMER_LPM_COMPANION_NONE */
+
 void sys_clock_set_timeout(int32_t ticks, bool idle)
 {
 	if (!IS_ENABLED(CONFIG_TICKLESS_KERNEL)) {
@@ -146,6 +281,14 @@ void sys_clock_set_timeout(int32_t ticks, bool idle)
 	if (idle && ticks == K_TICKS_FOREVER) {
 		return;
 	}
+
+#if !defined(CONFIG_SYSTEM_TIMER_LPM_COMPANION_NONE)
+	if (idle) {
+		arch_timer_lpm_enter(((uint64_t)ticks * USEC_PER_SEC) /
+				     CONFIG_SYS_CLOCK_TICKS_PER_SEC);
+		return;
+	}
+#endif
 
 	uint64_t next_cycle;
 
@@ -176,49 +319,14 @@ uint32_t sys_clock_elapsed(void)
 	return delta_ticks;
 }
 
-/*
- * Re-synchronise the driver's cycle/tick accounting after the system counter
- * has been reset by an SoC deep-sleep / power-gating state.
- *
- * The driver assumes a free-running counter that started at ~0 at boot, so it
- * keeps the invariant last_cycle == last_tick * CYC_PER_TICK.  When power-gating
- * resets the counter back to ~0 on resume, that invariant no longer holds: the
- * next ISR would compute a bogus (underflowed) delta against the stale
- * last_cycle, and sys_clock_set_timeout() would program a garbage compare.
- *
- * The SoC PM code calls this on wake, re-basing both last_cycle and last_tick
- * onto the post-reset counter (restoring the invariant) and passing the number
- * of ticks that elapsed while powered down (measured with an always-on timer)
- * so that timeouts which should have expired during sleep are serviced.  Pass
- * elapsed_ticks == 0 if the powered-down duration is unknown.
- */
-void sys_clock_arm_arch_timer_pm_resync(uint32_t elapsed_ticks)
-{
-	unsigned int key = arch_irq_lock();
-	uint64_t curr_cycle = arm_arch_timer_count();
-
-	last_cycle = (curr_cycle / CYC_PER_TICK) * CYC_PER_TICK;
-	last_tick = last_cycle / CYC_PER_TICK;
-	last_elapsed = 0;
-
-	arm_arch_timer_set_compare(last_cycle + CYC_PER_TICK);
-	arm_arch_timer_enable(true);
-	arm_arch_timer_set_irq_mask(false);
-	arch_irq_unlock(key);
-
-	if (elapsed_ticks != 0U) {
-		sys_clock_announce(elapsed_ticks);
-	}
-}
-
 uint32_t sys_clock_cycle_get_32(void)
 {
-	return (uint32_t)arm_arch_timer_count();
+	return (uint32_t)(cycles_lost_to_reset + arm_arch_timer_count());
 }
 
 uint64_t sys_clock_cycle_get_64(void)
 {
-	return arm_arch_timer_count();
+	return cycles_lost_to_reset + arm_arch_timer_count();
 }
 
 #ifdef CONFIG_ARCH_HAS_CUSTOM_BUSY_WAIT

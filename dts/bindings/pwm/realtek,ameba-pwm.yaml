@@ -17,7 +17,9 @@ properties:
   prescale:
     type: int
     required: true
-    description: 16 bit timer prescale for the global clock.
+    description: |
+      16 bit timer prescale for the global clock. The PSC register divides the
+      timer clock by (prescale + 1), so 0 is a valid value (divide by 1).
 
   clock-frequency:
     type: int
@@ -38,7 +40,6 @@ properties:
     const: 3
     description: |
       Number of items to expect in a PWM
-      - (TODO)
       - channel of the timer used for PWM
       - period to set in ns
       - flags : combination of standard flags like PWM_POLARITY_NORMAL

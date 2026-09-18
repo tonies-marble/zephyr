@@ -8,6 +8,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/pm/pm.h>
+#include <zephyr/drivers/timer/system_timer_lpm.h>
 #include <zephyr/pm/policy.h>
 #include <zephyr/arch/common/pm_s2ram.h>
 #include <zephyr/arch/arm/cortex_m/scb.h>
@@ -19,6 +20,8 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/logging/log_ctrl.h>
 #include <zephyr/sys/sys_io.h>
+
+#include "ameba_lpm_timer.h"
 
 /*
  * AmebaG2 only: the power-gate sleep needs a few IPs handed to the non-secure zone
@@ -35,8 +38,6 @@
 #endif
 
 LOG_MODULE_REGISTER(soc_pm, LOG_LEVEL_DBG);
-
-static uint32_t tick_before_sleep;
 
 #ifdef CONFIG_PM_POLICY_CUSTOM
 const struct pm_state_info *pm_policy_next_state(uint8_t cpu, int32_t ticks)
@@ -178,7 +179,7 @@ void pm_sleep_ram_for_wfe(struct CPU_BackUp_TypeDef *bk)
 
 #if defined(AMEBA_PM_TZ_PPC_HANDOVER)
 /*
- * Mirror of the SOCPS_PeriPermissionEntry() calls that FreeRTOS' AP-side
+ * Mirror of the SOCPS_PeriPermissionEntry() calls the hal's AP-side
  * vPortSystemPowerOff() makes around a power-gated sleep. The register is
  * secure-only, so it goes through the TF-M platform service; the secure side only
  * accepts the IPs listed in ameba_pmc_tz_ioctl.h.
@@ -244,67 +245,79 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 		return;
 	}
 
-	pmu_pre_sleep_processing(&tick_before_sleep);
+	/*
+	 * This is what actually sleeps: pmu_pre_sleep_processing() ends in
+	 * SOCPS_SleepPG()/SOCPS_SleepCG(). Its out-parameter is a system-timer
+	 * stamp for the hal's own tick compensation, which nothing reads here --
+	 * z_sys_clock_lpm_exit() samples the timer itself -- so it goes to a local.
+	 */
+	{
+		uint32_t hal_tick_before_sleep;
+
+		pmu_pre_sleep_processing(&hal_tick_before_sleep);
+	}
 }
 
 /*
- * Both sleep states stop SysTick -- clock-gating takes the core clock away and
- * power-gating takes the core with it -- so the kernel loses the whole sleep from
- * its notion of time, and every k_timeout_t outlives its deadline by however long
- * the system slept. FreeRTOS gets the time back through
- * configPOST_SLEEP_PROCESSING (pmu_post_sleep_processing() -> vTaskCompTick());
- * do the equivalent here.
+ * Both sleep states stop SysTick, so the kernel loses the whole sleep from its
+ * notion of time unless something hands the elapsed time back. Doing that by
+ * calling sys_clock_announce() from here would only repair uptime: the driver also
+ * keeps a cycle_count that k_cycle_get_32() reads, which is static to it and has to
+ * stay in step with its announced_cycles. Reporting through the system timer's
+ * low-power companion hooks lets the driver repair both.
  *
- * The reference is the ameba system timer (TIM0), free-running at 32768 Hz and
- * kept powered across both sleep states, which pmu_pre_sleep_processing() sampled
- * into tick_before_sleep just before sleeping.
- *
- * Elapsed system-timer ticks are accumulated rather than converted one sleep at a
- * time: at 32768 Hz against a 10 kHz kernel each sleep leaves a sub-tick
- * remainder, and dropping it would lose up to 3 ticks per sleep, which a workload
- * that sleeps continuously turns straight back into a drifting clock.
- *
- * The accumulator is the reason the sample has to be checked before it goes in
- * rather than sanity-checked afterwards: it only ever moves forward, as does
- * sys_clock_announce(), so a single bad sample cannot be taken back and skews
- * uptime for the rest of the boot.
- *
- * SYSTIMER_GetPassTick() is deliberately not used for that reason. The ROM
- * implementation treats current < start as a counter wrap and returns
- * 0xFFFFFFFF - (start - current), which is right for a free-running counter and
- * catastrophic for one that got reset: it announces ~2^32 ticks, i.e. 2^32/32768
- * = 36:24:32 of sleep, after which every k_timeout_t is already expired. That is
- * not hypothetical -- TIM0 is also TIMER0, which the dts exposes as a Zephyr
- * counter device, and an application driving it as one resets and stops it. The
- * dts nodes carry a warning and the sample was moved off timer0, but a
- * non-monotonic reading has to be survivable here regardless. A real wrap takes
- * a single sleep of 36 hours and is not worth distinguishing.
+ * Only the measurement is ours: the always-on ameba system timer (TIM0), sampled in
+ * common/ameba_lpm_timer.c, which the CA32 path shares. The other half of
+ * z_sys_clock_lpm_enter()'s contract -- guarantee a wake within max_lpm_time_us --
+ * is met by publishing that deadline for the PMC wake timer, below.
  */
-#define AMEBA_SYSTIMER_HZ 32768U
 
-static void pm_announce_time_lost_while_asleep(void)
+BUILD_ASSERT(IS_ENABLED(CONFIG_SYSTEM_TIMER_LPM_COMPANION_HOOKS),
+	     "the ameba PM path reports slept time through the system timer's low-power "
+	     "companion hooks; without them neither kernel time base survives a sleep");
+
+/*
+ * Upper bound on what is handed to the PMC wake timer, set by the millisecond-to-tick
+ * conversion rather than by the counter. pmu_set_wakeup_timer() scales by 32.7695 as
+ * (ms << 5) + ((ms * 197) >> 8), avoiding a division; the ms * 197 in there overflows
+ * 32 bits from 6.06 hours on, well before the counter itself wraps at 36.4 hours. So
+ * bound it at four hours, comfortably inside that, and treat anything longer as "no
+ * deadline" -- which is what the kernel means by a timeout that far out anyway.
+ */
+#define AMEBA_PMC_WAKE_MAX_MS (4U * 60U * 60U * 1000U)
+
+void z_sys_clock_lpm_enter(uint64_t max_lpm_time_us)
 {
-	static uint64_t elapsed_systimer_ticks;
-	static uint64_t announced_kernel_ticks;
-	uint64_t kernel_ticks;
-	uint32_t now = SYSTIMER_TickGet();
+	uint64_t deadline_ms = max_lpm_time_us / USEC_PER_MSEC;
 
-	if (now < tick_before_sleep) {
-		LOG_WRN("system timer went backwards (%u -> %u), sleep time lost",
-			tick_before_sleep, now);
-		return;
+	ameba_lpm_timer_mark_entry();
+
+	/*
+	 * Give the PMC the deadline the kernel is idling to. pmu_get_sleep_time()
+	 * reads this range on the way into the sleep and lib_pmc.a arms the PMC wake
+	 * timer from it, so the sleep ends on time whether or not the application has
+	 * a wake source of its own armed.
+	 *
+	 * min > max selects that function's one-shot case: it returns max and resets
+	 * the range to PMU_SLEEP_FOREVER, so a later sleep that arrives without a
+	 * deadline (the kernel skips this hook entirely for K_TICKS_FOREVER) is not
+	 * woken by a stale one. Clamped to at least 1 ms because a max of 0 is the
+	 * encoding for "no deadline" and would ask for a sleep that never ends.
+	 */
+	if (deadline_ms == 0U) {
+		deadline_ms = 1U;
 	}
 
-	elapsed_systimer_ticks += now - tick_before_sleep;
-	kernel_ticks = (elapsed_systimer_ticks * CONFIG_SYS_CLOCK_TICKS_PER_SEC) /
-		       AMEBA_SYSTIMER_HZ;
-
-	if (kernel_ticks > announced_kernel_ticks) {
-		uint32_t ticks = (uint32_t)(kernel_ticks - announced_kernel_ticks);
-
-		announced_kernel_ticks = kernel_ticks;
-		sys_clock_announce(ticks);
+	if (deadline_ms <= AMEBA_PMC_WAKE_MAX_MS) {
+		pmu_set_sleep_time_range(PMU_SLEEP_FOREVER, (uint32_t)deadline_ms);
+	} else {
+		pmu_set_sleep_time_range(PMU_SLEEP_FOREVER, PMU_SLEEP_FOREVER);
 	}
+}
+
+uint64_t z_sys_clock_lpm_exit(void)
+{
+	return ameba_lpm_timer_elapsed_us();
 }
 
 void pm_state_exit_post_ops(enum pm_state state, uint8_t substate_id)
@@ -312,8 +325,6 @@ void pm_state_exit_post_ops(enum pm_state state, uint8_t substate_id)
 	ARG_UNUSED(substate_id);
 
 	pmu_acquire_deepwakelock(PMU_OS);
-
-	pm_announce_time_lost_while_asleep();
 
 	LOG_INF("[%s] AP wake: %d", __func__, state);
 	irq_unlock(0);
