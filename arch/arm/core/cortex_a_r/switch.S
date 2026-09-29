@@ -135,12 +135,15 @@ offload:
     add r3, r3, #1
     str r3, [r2, #___cpu_t_nested_OFFSET]
 
-    /* If not nested: switch to IRQ stack and save current sp on it. */
+    /* If not nested: switch to IRQ stack and save current sp on it.
+     * The dummy r1 word keeps the IRQ stack 8-byte aligned (AAPCS);
+     * z_arm_cortex_ar_irq_done pops both words.
+     */
     cmp r3, #1
     bhi 1f
     mov r0, sp
     cps #MODE_IRQ
-    push {r0}
+    push {r0, r1}
 
 1:
     blx z_irq_do_offload

@@ -255,12 +255,16 @@ SECTION_FUNC(TEXT, _isr_wrapper)
 	add r0, #1
 	str r0, [r2, #___cpu_t_nested_OFFSET]
 
-	/* If not nested: switch to IRQ stack and save current sp on it. */
+	/* If not nested: switch to IRQ stack and save current sp on it.
+	 * r1 is a dummy word keeping the 8-byte stack alignment AAPCS
+	 * requires (NEON :64 stores fault otherwise); popped in
+	 * z_arm_cortex_ar_irq_done.
+	 */
 	cmp r0, #1
 	bhi 1f
 	mov r0, sp
 	cps #MODE_IRQ
-	push {r0}
+	push {r0, r1}
 1:
 #ifdef CONFIG_TRACING_ISR
 	bl sys_trace_isr_enter
@@ -356,8 +360,8 @@ z_arm_cortex_ar_irq_done:
 	 */
 	bhi __EXIT_INT
 
-	/* retrieve pointer to the current thread */
-	pop {r0}
+	/* Interrupted sp saved at IRQ entry; r1 is the dummy alignment word. */
+	pop {r0, r1}
 	cps #MODE_SYS
 	mov sp, r0
 
