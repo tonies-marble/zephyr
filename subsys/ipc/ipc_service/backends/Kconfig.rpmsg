@@ -21,6 +21,21 @@ config IPC_SERVICE_BACKEND_RPMSG_SHMEM_RESET
 	  When this parameter is set to 'y' the status region of the shared
 	  memory is reset on kernel initialization.
 
+config IPC_SERVICE_BACKEND_RPMSG_SHMEM_RESET_REMOTE
+	bool "Reset shared memory state also on the remote"
+	help
+	  Same as IPC_SERVICE_BACKEND_RPMSG_SHMEM_RESET, but applied to
+	  instances with the 'remote' role.  On platforms where the shared
+	  memory retains its content across a reset, a rebooting remote would
+	  otherwise read the stale VDEV status left by the previous run
+	  (including DRIVER_OK), skip waiting for the host and send its
+	  one-shot name-service announcement into vrings the host has not set
+	  up yet -- which the host then wipes during its own initialization,
+	  leaving the endpoint unbindable.  Only enable this when the remote
+	  is guaranteed to boot (and clear the status region) before the host
+	  opens the instance, otherwise the remote can erase a live DRIVER_OK
+	  written by an already-running host.
+
 config IPC_SERVICE_BACKEND_RPMSG_NUM_ENDPOINTS_PER_INSTANCE
 	int "Max number of registered endpoints per instance"
 	default 2
