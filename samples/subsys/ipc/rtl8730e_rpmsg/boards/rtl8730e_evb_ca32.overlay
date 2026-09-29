@@ -1,0 +1,94 @@
+/*
+ * Copyright (c) 2026 Realtek Semiconductor Corp.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * CA32 (Cortex-A32) = OpenAMP rpmsg HOST for BOTH remotes.
+ *
+ * IPC block: IPCAP @ 0x41000580 (this core's own doorbell view).  The single
+ * block and its single interrupt (GIC SPI 24 / INTID 56) are shared by the two
+ * rpmsg instances; each registers its RX callback on a disjoint absolute bit.
+ *
+ * mbox cells are ABSOLUTE register bits (see realtek,rtl8730e-ipc.yaml):
+ *   KM4 link  (AP<->NP): CA32 tx = bit 5  (AP_TO_NP ch5), rx = bit 18 (NP_TO_AP ch2)
+ *   KM0 link  (AP<->LP): CA32 tx = bit 12 (AP_TO_LP ch4), rx = bit 28 (LP_TO_AP ch4)
+ *
+ * Cache coherency: the shared regions are made Normal Non-cacheable on the CA32
+ * side by dedicated MMU entries in soc/.../mmu_regions.c (REGION_KM4_VRING /
+ * REGION_KM0_VRING), gated on CONFIG_MBOX_REALTEK_AMEBA_IPC.  zephyr,memory-attr
+ * is not consumed by the Cortex-A arm_mmu, hence the static table there.
+ */
+
+#include <zephyr/dt-bindings/interrupt-controller/arm-gic.h>
+
+/ {
+	/*
+	 * KM4 shared vring + rpmsg buffer pool: 64 KB at 0x60700000.
+	 * Base of KM4_DRAM_HEAP_EXT (ameba_layout.ld, 0x60700000..PSRAM_END
+	 * 0x60800000): non-secure PSRAM, addressed identically by CA32 and KM4.
+	 * CA32 dram0 is shrunk below so it no longer covers this window.
+	 */
+	sram_ipc: memory@60700000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x60700000 DT_SIZE_K(64)>;
+		zephyr,memory-region = "SRAM_IPC";
+	};
+
+	/*
+	 * KM0 shared vring: 16 KB at 0x2301B000 in KM0 SRAM.  KM0 (LP domain)
+	 * CANNOT reach PSRAM 0x60xxxxxx (its KM0_BD_DRAM is a len-0 sentinel), so
+	 * the CA32<->KM0 region must live in the 0x23xxxxxx SRAM both cores share.
+	 * CA32 reaches it through REGION_SRAM (0x20000000+512M) and the dedicated
+	 * non-cacheable REGION_KM0_VRING MMU entry.
+	 */
+	sram_ipc_lp: memory@2301b000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x2301b000 DT_SIZE_K(16)>;
+		zephyr,memory-region = "SRAM_IPC_LP";
+	};
+
+	soc {
+		ipc_mbox: mbox@41000580 {
+			compatible = "realtek,rtl8730e-ipc";
+			reg = <0x41000580 0x14>;
+			interrupt-parent = <&gic>;
+			interrupts = <GIC_SPI 24 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
+			#mbox-cells = <1>;
+			status = "okay";
+		};
+	};
+
+	ipc {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		ipc0: ipc0 {
+			compatible = "zephyr,ipc-openamp-static-vrings";
+			memory-region = <&sram_ipc>;
+			mboxes = <&ipc_mbox 5>, <&ipc_mbox 18>;
+			mbox-names = "tx", "rx";
+			role = "host";
+			status = "okay";
+		};
+
+		ipc1: ipc1 {
+			compatible = "zephyr,ipc-openamp-static-vrings";
+			memory-region = <&sram_ipc_lp>;
+			mboxes = <&ipc_mbox 12>, <&ipc_mbox 28>;
+			mbox-names = "tx", "rx";
+			role = "host";
+			status = "okay";
+		};
+	};
+};
+
+/*
+ * Carve the KM4 shared IPC region out of the CA32 application RAM. dram0
+ * otherwise spans 0x60300000..0x60800000 (5 MB) and the linker would place
+ * .bss/heap on top of the vrings. Shrink it to CA32_BL3_DRAM_NS
+ * (0x60300000..0x60700000).  This also makes AMEBASMART_DRAM_END = 0x60700000
+ * so REGION_KM4_VRING (0x60700000+64K) does not overlap REGION_DRAM_BEYOND.
+ */
+&dram0 {
+	reg = <0x60300000 (0x60700000 - 0x60300000)>;
+};

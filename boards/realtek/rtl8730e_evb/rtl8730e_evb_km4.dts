@@ -1,0 +1,112 @@
+/*
+ * Copyright (c) 2026 Realtek Semiconductor Corp.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * RTL8730E EVB — KM4 (Cortex-M55 / Armv8.1-M) application domain.
+ *
+ * This DTS describes the KM4 Zephyr *application* (non-secure image2): text and
+ * rodata execute in place (XIP) from the KM4 flash logic window
+ * (KM4_IMG2_XIP = 0x0D000020, see ameba_layout.ld / rtl8730e_evb_partitions.h),
+ * while data/bss/stacks/heap live in PSRAM (KM4_BD_DRAM @ 0x60000020).  PSRAM is
+ * brought up by the KM4 bootloader (MCUboot) before this image is entered.
+ *
+ * The SAME board target (rtl8730e_evb/rtl8730e/km4) is also used to build the
+ * MCUboot bootloader image, which needs a completely different (all-SRAM)
+ * memory map.  That layout is supplied for the bootloader build only, via
+ *   bootloader/mcuboot/boot/zephyr/boards/rtl8730e_evb_rtl8730e_km4.overlay
+ * which deletes the application RAM node below and replaces it with the
+ * ROM-bounded boot-copy SRAM window (plus the mcuboot-only zephyr,user props).
+ */
+
+/dts-v1/;
+
+#include <arm/armv8.1-m.dtsi>
+#include <mem.h>
+#include <freq.h>
+#include "rtl8730e_evb_partitions.h"
+
+/ {
+	model = "Realtek RTL8730E EVB (KM4)";
+	compatible = "realtek,rtl8730e_evb";
+
+	clocks {
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		clk_sys: clk_sys {
+			#clock-cells = <0>;
+			compatible = "fixed-clock";
+			clock-frequency = <DT_FREQ_M(230)>;
+		};
+	};
+
+	chosen {
+		zephyr,sram             = &sram0;
+		zephyr,flash            = &flash0;
+		zephyr,flash-controller = &spic;
+		zephyr,code-partition   = &slot0_partition;
+		zephyr,console          = &loguart;
+		zephyr,shell-uart       = &loguart;
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu0: cpu@0 {
+			device_type = "cpu";
+			compatible = "arm,cortex-m55";
+			reg = <0>;
+		};
+	};
+
+	/*
+	 * KM4 application main RAM = PSRAM KM4_BD_DRAM non-secure window.
+	 * ameba_layout.ld: KM4_BD_DRAM ORIGIN 0x60000020, end 0x6015B000 (~1387 KB).
+	 * (Its secure alias is 0x70000000; the app is non-secure so it uses the
+	 * 0x60000000 view.)  data / bss / noinit / stacks / heap are placed here by
+	 * the Cortex-M linker script; XIP keeps text+rodata in flash.
+	 */
+	sram0: memory@60000020 {
+		compatible = "mmio-sram";
+		reg = <0x60000020 (0x6015B000 - 0x60000020)>;
+	};
+
+	soc {
+		rcc: rcc@42008000 {
+			compatible = "realtek,ameba-rcc";
+			reg = <0x42008000 0x400>;
+			#clock-cells = <1>;
+			status = "okay";
+		};
+
+		loguart: serial@4200c000 {
+			compatible = "realtek,ameba-loguart";
+			reg = <0x4200c000 0x200>;
+			clocks = <&rcc 0>;
+			interrupts = <8 3>;
+			current-speed = <1500000>;
+			status = "okay";
+		};
+
+		spic: flash-controller@44000000 {
+			compatible = "realtek,ameba-flash-controller";
+			reg = <0x44000000 0x400>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			status = "okay";
+
+			flash0: flash@e000020 {
+				/* KM4's RSIP XIP logic window (KM4_IMG2_XIP). */
+				reg = <0x0d000020 DT_SIZE_M(6)>;
+#include "rtl8730e_evb_partitions.dtsi"
+			};
+		};
+	};
+};
+
+/* Set NVIC priority bits (matches __NVIC_PRIO_BITS = 3 in cmsis_cpu.h). */
+&nvic {
+	arm,num-irq-priority-bits = <3>;
+};

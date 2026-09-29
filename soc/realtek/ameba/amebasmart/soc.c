@@ -175,9 +175,21 @@ void sys_arch_reboot(int type)
  */
 static int soc_ipc_irq_init(void)
 {
+	/*
+	 * When the OpenAMP rpmsg MBOX driver (mbox_realtek_ameba_ipc) is present,
+	 * it owns the AP IPC block (IPCAP) doorbell, IMR and the single AP IPC
+	 * interrupt line (INTID 56 / GIC_SPI 24). Skip the legacy vendor IPC
+	 * bring-up here to avoid a double IRQ_CONNECT on that line.
+	 */
+#ifndef CONFIG_MBOX_REALTEK_AMEBA_IPC
 	ipc_table_init(IPCAP_DEV);
 	IRQ_CONNECT(IPC_AP_IRQ, INT_PRI_MIDDLE, IPC_INTHandler, (uint32_t)IPCAP_DEV, 0);
 	irq_enable(IPC_AP_IRQ);
+#else
+	BUILD_ASSERT(!IS_ENABLED(CONFIG_WIFI_AMEBA),
+		     "CONFIG_WIFI_AMEBA needs the vendor IPC dispatcher, which the "
+		     "rpmsg MBOX driver replaces on the shared AP IPC interrupt");
+#endif
 
 #ifdef CONFIG_SMP
 	IRQ_CONNECT(FLASH_PG_SGI, INT_PRI_MIDDLE, flash_pg_ipi_handler, NULL, 0);

@@ -34,6 +34,18 @@ enum amebasmart_mmu_region_idx {
 	REGION_PSRAM_IMAGE2,
 	REGION_DRAM_BEYOND,
 	REGION_HIGH_PERIPHERAL,
+#ifdef CONFIG_MBOX_REALTEK_AMEBA_IPC
+	/*
+	 * OpenAMP rpmsg shared vrings.  Only present when the RTL8730E IPC
+	 * mailbox driver is in the build (i.e. the rtl8730e_rpmsg sample), which
+	 * is also the configuration where dram0 is shrunk to end at 0x60700000,
+	 * so REGION_KM4_VRING cannot overlap REGION_DRAM_BEYOND.  Mapped Normal
+	 * Non-cacheable (no MATTR_CACHE_* bits) rather than strongly-ordered so
+	 * OpenAMP's unaligned memcpy into rpmsg buffers is legal on Cortex-A.
+	 */
+	REGION_KM4_VRING,
+	REGION_KM0_VRING,
+#endif
 	REGION_COUNT,
 };
 
@@ -94,6 +106,20 @@ static struct arm_mmu_region amebasmart_mmu_regions[REGION_COUNT] = {
 		"high_peripheral", 0x80000000, GB(1),
 		MT_DEVICE | MATTR_SHARED | MPERM_R | MPERM_W |
 			MATTR_MAY_MAP_L1_SECTION),
+
+#ifdef CONFIG_MBOX_REALTEK_AMEBA_IPC
+	/* CA32<->KM4 rpmsg vrings @0x60700000 (64 KB), Normal Non-cacheable RW. */
+	[REGION_KM4_VRING] = MMU_REGION_FLAT_ENTRY(
+		"km4_vring", 0x60700000, KB(64),
+		MT_NORMAL | MATTR_SHARED | MPERM_R | MPERM_W),
+
+	/* CA32<->KM0 rpmsg vrings @0x2301B000 (16 KB), Normal Non-cacheable RW.
+	 * KM0 SRAM window (overrides the cacheable REGION_SRAM mapping here).
+	 */
+	[REGION_KM0_VRING] = MMU_REGION_FLAT_ENTRY(
+		"km0_vring", 0x2301B000, KB(16),
+		MT_NORMAL | MATTR_SHARED | MPERM_R | MPERM_W),
+#endif
 };
 
 const struct arm_mmu_config mmu_config = {

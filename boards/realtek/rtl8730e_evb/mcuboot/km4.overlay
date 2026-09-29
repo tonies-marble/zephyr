@@ -1,0 +1,107 @@
+/*
+ * Copyright (c) 2026 Realtek Semiconductor Corp.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * MCUboot bootloader overlay for the KM4 (Cortex-M55) domain.
+ *
+ * The board's rtl8730e_evb_km4.dts describes the KM4 *application* (non-secure
+ * image2): XIP text in flash, data/bss in PSRAM.  The MCUboot bootloader image
+ * that runs on the same core needs a completely different memory map: it is
+ * fully SRAM-resident (CONFIG_XIP=n) inside the mask-ROM boot-copy window, and
+ * it consumes a set of /zephyr,user boot parameters (used by
+ * common/mcuboot_action_hook.c -> boot_prepare()).
+ *
+ * This overlay lives in the board tree (not the MCUboot repo) and is injected
+ * into the mcuboot image by this board's sysbuild.cmake, which pins mcuboot to
+ * rtl8730e_evb/rtl8730e/km4 and sets this file as mcuboot_DTC_OVERLAY_FILE (the
+ * REPLACING variant, not EXTRA_): that suppresses MCUboot's own app.overlay,
+ * exactly as the previous in-tree board overlay did, so zephyr,code-partition
+ * stays &slot0_partition rather than app.overlay's &boot_partition.  See the
+ * sysbuild.cmake comment for the full rationale.
+ * Keeping it here leaves the upstream MCUboot repo pristine.  It removes the
+ * application's PSRAM RAM node and installs:
+ *   - sram0 : the ROM-bounded KM4 loader SRAM window
+ *   - psram : the (disabled) PSRAM node whose bounds loader_section.ld's
+ *             ChipInfo_PsramBoundary() derivation reads
+ *   - /zephyr,user : the boot_prepare() RSIP logic-address parameters
+ */
+
+#include <mem.h>
+
+/*
+ * NOTE: the board's rtl8730e_evb_partitions.h (FLASH_BASE_PHY / *_LOGIC_ADDR)
+ * is not #included here.  This overlay is preprocessed as part of the mcuboot
+ * image build, whose DT include path is the mcuboot application's, not this
+ * board directory -- so the relative include the base .dts relies on is not
+ * available.  The few constants the bootloader needs are therefore inlined
+ * below, tagged with their partitions.h names so they stay easy to cross-check.
+ */
+#define FLASH_BASE_PHY    0x08000000   /* SPI_FLASH_BASE */
+#define KM4_LOGIC_ADDR    0x0D000000   /* KM4_IMG2_XIP  base (MMU_HP_IDX) */
+#define KM0_LOGIC_ADDR    0x0C000000   /* KM0_IMG2_XIP  base (MMU_LP_IDX) */
+#define CA32_LOGIC_ADDR   0x0E000000   /* CA32_IMG2_XIP base (MMU_AP_IDX) */
+
+/*
+ * KM4 MCUboot SRAM window — bounded by the mask ROM boot loader.
+ *
+ * The ROM only copies a boot sub-image whose destination passes IS_BOOT_ADDR():
+ *     HS_BOOT_ADDR_START <= DstAddr <= HS_BOOT_ADDR_END
+ * Both bounds are hard-wired in the ROM (hal_platform.h, "rom used, can not
+ * change") — the ROM itself uses SRAM above HS_BOOT_ADDR_END while it runs the
+ * copy, so the loader image MUST NOT extend past it.  We DERIVE the region size
+ * from these two bounds rather than hardcoding, so the linker region can never
+ * silently overrun the ROM copy window (matches native KM4_FLOADER_RAM_S:
+ * origin 0x30003020, end 0x3001B000).
+ *
+ * Mirror of hal_platform.h (source of truth — keep in sync if ROM changes):
+ *   HS_SRAM_S_ADDR_START = 0x30000000
+ *   HS_BOOT_ADDR_START   = +0x03000  (0x30003000, image1 load base)
+ *   HS_BOOT_ADDR_END     = +0x1AFFF  (0x3001AFFF, last byte the ROM will place)
+ *   image header         = 0x20      (code/linker RAM begins after the header)
+ */
+#define HS_SRAM_S_ADDR_START  0x30000000
+#define HS_BOOT_ADDR_START    (HS_SRAM_S_ADDR_START + 0x03000)
+#define HS_BOOT_ADDR_END      (HS_SRAM_S_ADDR_START + 0x1AFFF)
+#define KM4_IMG_HEADER_SIZE   0x20
+#define KM4_LOADER_RAM_BASE   (HS_BOOT_ADDR_START + KM4_IMG_HEADER_SIZE)
+#define KM4_LOADER_RAM_SIZE   (HS_BOOT_ADDR_END + 1 - KM4_LOADER_RAM_BASE)
+
+/* Drop the KM4 application PSRAM RAM node before re-declaring sram0 below. */
+/delete-node/ &sram0;
+
+/ {
+	/*
+	 * base 0x30003020, size KM4_LOADER_RAM_SIZE = 0x3001B000 - 0x30003020
+	 * = 0x17FE0 (~96 KB).  See the ROM boot-window derivation above.
+	 */
+	sram0: memory@30003020 {
+		compatible = "mmio-sram";
+		reg = <KM4_LOADER_RAM_BASE KM4_LOADER_RAM_SIZE>;
+	};
+
+	psram: memory@60000000 {
+		compatible = "zephyr,memory-region";
+		device_type = "memory";
+		reg = <0x60000000 DT_SIZE_M(64)>;
+		zephyr,memory-region = "PSRAM";
+		status = "disabled";
+	};
+
+	/* KM4 parameters used by mcuboot_action_hook.c → boot_prepare() */
+	zephyr,user {
+		flash-base-phy       = <FLASH_BASE_PHY>;
+		primary-logic-addr   = <KM4_LOGIC_ADDR>;
+		secondary-logic-addr = <KM0_LOGIC_ADDR>;
+		tertiary-logic-addr  = <CA32_LOGIC_ADDR>;
+		/*
+		 * Consumed only by upstream boot/zephyr/flash_map_extended.c's
+		 * CONFIG_SOC_FAMILY_REALTEK_AMEBA branch (mcuboot's own do_boot()
+		 * flash base).  AmebaSmart has no RSIP logic-address remap active
+		 * at mcuboot's own jump time (that is set up later, by
+		 * boot_prepare(), for the KM4/AP images) — so this intentionally
+		 * equals flash-base-phy, not a RSIP-remapped address.
+		 */
+		primary-logic-base    = <FLASH_BASE_PHY>;
+	};
+};

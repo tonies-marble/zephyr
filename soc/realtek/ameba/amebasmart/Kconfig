@@ -9,7 +9,8 @@ config SOC_RTL8730E_CA32
 	select FPU
 	select HAS_PM
 
-# KM4 — MCUboot bootloader domain
+# KM4 — high-performance network processor (Real-M300V, Armv8.1-M / Cortex-M55
+# compatible). Runs the MCUboot bootloader image and the KM4 Zephyr application.
 config SOC_RTL8730E_KM4
 	select ARM
 	select CPU_CORTEX_M55
@@ -20,3 +21,19 @@ config SOC_RTL8730E_KM4
 	select CPU_HAS_FPU
 	select CPU_HAS_VFP
 	select DYNAMIC_INTERRUPTS
+
+# KM0 — low-power core (Real-M200, Armv8-M baseline / Cortex-M23 compatible).
+config SOC_RTL8730E_KM0
+	select ARM
+	select CPU_CORTEX_M23
+	select CPU_HAS_ARM_MPU
+	select ARM_MPU
+	select DYNAMIC_INTERRUPTS
+	# The KM0 image runs from SRAM (not from address 0x0), so the Cortex-M23
+	# VTOR must be used to relocate the vector table.
+	select CPU_CORTEX_M_HAS_VTOR
+	# SysTick is optional on Armv8-M baseline (Cortex-M23), so the arch does not
+	# select it by default.  The RTL8730E KM0 core does implement SysTick (the
+	# KM0 devicetree enables the arm,armv8m-systick node), so declare the
+	# capability here to let CORTEX_M_SYSTICK be the KM0 kernel timer.
+	select CPU_CORTEX_M_HAS_SYSTICK

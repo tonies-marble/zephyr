@@ -1,0 +1,55 @@
+# Copyright (c) 2026 Realtek Semiconductor Corp.
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  Realtek RTL8730E (AmebaSmart) inter-processor communication (IPC) mailbox.
+
+  Each CPU (CA32/AP, KM4/NP, KM0/LP) owns a 5 x u32 IPC register block that acts
+  as a doorbell controller with 8 channels per direction:
+
+    0x00 TX_DATA : write BIT(channel) to signal the peer core
+    0x04 RX_DATA : mirror of the peer's TX_DATA
+    0x08 ISR     : RX-full / TX-empty status, write-1-to-clear
+    0x0C IMR     : interrupt mask, 1 = unmask/enable
+    0x10 ICR     : interrupt clear register
+
+  The group shift is direction-dependent (see the vendor HAL
+  ameba_ipc_api.c / ameba_ipc.h), so the single mbox cell is the ABSOLUTE
+  register bit index (0..31) rather than a bare 0..7 channel.  This lets one
+  driver serve every core pair by pushing the per-link bit-math into DT:
+
+    TX_DATA doorbell : TX1 group = bits  0..7, TX0 group = bits  8..15
+    ISR/IMR RX-full  : RX1 group = bits 16..23, RX0 group = bits 24..31
+
+  Per link/direction (ch = the logical 0..7 channel of that link):
+
+    AP_TO_NP (CA32->KM4)  TX bit ch+0    RX-full bit ch+16
+    NP_TO_AP (KM4->CA32)  TX bit ch+0    RX-full bit ch+16
+    AP_TO_LP (CA32->KM0)  TX bit ch+8    RX-full bit ch+16
+    LP_TO_AP (KM0->CA32)  TX bit ch+0    RX-full bit ch+24
+
+  A single interrupt line per core demuxes all bits.
+
+  Model each block as an MBOX controller: the single mbox cell selects the
+  absolute IPC register bit (0..31).
+
+compatible: "realtek,rtl8730e-ipc"
+
+include: [mailbox-controller.yaml, base.yaml]
+
+properties:
+  reg:
+    required: true
+
+  interrupts:
+    required: true
+
+  "#mbox-cells":
+    const: 1
+
+# The Zephyr mbox subsystem hard-codes the specifier cell name to "channel"
+# (DT_MBOX_CHANNEL_BY_NAME -> DT_PHA_BY_NAME_OR(..., channel, 0)); any other name
+# silently resolves to 0.  So the single cell -- the absolute IPC register bit
+# (0..31) -- must be named "channel".
+mbox-cells:
+  - channel

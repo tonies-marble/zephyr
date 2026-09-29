@@ -1,17 +1,20 @@
 # Copyright (c) 2026 Realtek Semiconductor Corp.
 # SPDX-License-Identifier: Apache-2.0
 
-# Main board: CA32 Zephyr application domain.
-# When the mcuboot variant is active, BOARD_RTL8730E_EVB_MCUBOOT is also y,
-# so the CA32-only selects are guarded by !BOARD_RTL8730E_EVB_MCUBOOT.
+# The RTL8730E is a tri-core AmebaSmart SoC. Each core is exposed as a Zephyr
+# CPU cluster (see soc/realtek/ameba/soc.yml), selected via the board target
+# qualifier rtl8730e_evb/rtl8730e/<cluster>:
+#
+#   .../ca32 : dual Cortex-A32 application processor (SMP), boots via TF-A
+#   .../km4  : Cortex-M55 network processor (KM4 app + MCUboot bootloader image)
+#   .../km0  : Cortex-M23 low-power core
+#
+# Zephyr generates BOARD_<board>_<soc>_<cluster> for each qualifier; the board
+# forwards the matching per-cluster hidden SoC symbol.
 config BOARD_RTL8730E_EVB
 	bool "RTL8730E EVB Platform Board"
-	select SOC_RTL8730E_CA32 if !BOARD_RTL8730E_EVB_RTL8730E_MCUBOOT
-	select BUILD_WITH_TFA    if !BOARD_RTL8730E_EVB_RTL8730E_MCUBOOT
-
-# MCUboot variant: KM4 (Cortex-M55) bootloader domain.
-# Zephyr sets BOARD_<board>_<soc>_<qualifier> = BOARD_RTL8730E_EVB_RTL8730E_MCUBOOT
-# when building with BOARD=rtl8730e_evb//mcuboot (board.yml soc=rtl8730e, variant=mcuboot).
-config BOARD_RTL8730E_EVB_RTL8730E_MCUBOOT
-	bool "RTL8730E EVB MCUboot variant (KM4)"
-	select SOC_RTL8730E_KM4
+	select SOC_RTL8730E_CA32 if BOARD_RTL8730E_EVB_RTL8730E_CA32
+	select SOC_RTL8730E_KM4  if BOARD_RTL8730E_EVB_RTL8730E_KM4
+	select SOC_RTL8730E_KM0  if BOARD_RTL8730E_EVB_RTL8730E_KM0
+	# The CA32 application is loaded by ARM Trusted Firmware (BL2 → BL31/PSCI).
+	select BUILD_WITH_TFA    if BOARD_RTL8730E_EVB_RTL8730E_CA32

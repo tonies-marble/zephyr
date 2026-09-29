@@ -4,5 +4,3 @@ board:
   vendor: realtek
   socs:
     - name: rtl8730e
-      variants:
-        - name: mcuboot

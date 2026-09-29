@@ -13,3 +13,7 @@ family:
       - name: amebasmart
         socs:
           - name: rtl8730e
+            cpuclusters:
+              - name: km0
+              - name: km4
+              - name: ca32

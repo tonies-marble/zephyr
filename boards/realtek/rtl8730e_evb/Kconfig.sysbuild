@@ -1,0 +1,38 @@
+# Copyright (c) 2026 Realtek Semiconductor Corp.
+# SPDX-License-Identifier: Apache-2.0
+
+# The RTL8730E secure boot ROM validates and starts the MCUboot image on the
+# KM4 core, which then chain-loads the signed application images.
+choice BOOTLOADER
+	default BOOTLOADER_MCUBOOT
+endchoice
+
+config RTL8730E_BUILD_KM4_APP
+	bool "Build the KM4 network-processor application as a second image"
+	help
+	  When set, sysbuild builds the KM4 (Cortex-M55) application in addition to
+	  the default application, so a single build produces both the CA32 and KM4
+	  binaries. Requires RTL8730E_KM4_APP_SOURCE_DIR to point at the KM4 app.
+
+config RTL8730E_KM4_APP_SOURCE_DIR
+	string "Source directory of the KM4 application"
+	depends on RTL8730E_BUILD_KM4_APP
+	help
+	  Absolute path (or path relative to APP_DIR) of the KM4 application that
+	  sysbuild builds for the rtl8730e_evb/rtl8730e/km4 target.
+
+config RTL8730E_BUILD_KM0_APP
+	bool "Build the KM0 low-power application as a second image"
+	help
+	  When set, sysbuild builds the KM0 (Cortex-M23) application in addition to
+	  the default application, so a single build produces the CA32, KM4 and KM0
+	  binaries. Requires RTL8730E_KM0_APP_SOURCE_DIR to point at the KM0 app.
+	  The KM0 app's packaged image2 is folded into the CA32 app.bin by the
+	  non-MCUboot CA32 image-assembly path (merge_bin.py handle_amebasmart).
+
+config RTL8730E_KM0_APP_SOURCE_DIR
+	string "Source directory of the KM0 application"
+	depends on RTL8730E_BUILD_KM0_APP
+	help
+	  Absolute path (or path relative to APP_DIR) of the KM0 application that
+	  sysbuild builds for the rtl8730e_evb/rtl8730e/km0 target.

@@ -1,0 +1,58 @@
+/*
+ * Copyright (c) 2026 Realtek Semiconductor Corp.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * KM4 (Cortex-M55) = OpenAMP rpmsg REMOTE.
+ *
+ * IPC block: IPCNP @ 0x41000500 (this core's own doorbell view).
+ * Interrupt : NVIC IRQ 24 (IPC_NP_IRQ), level triggered.
+ *
+ * mbox cells are ABSOLUTE register bits (see realtek,rtl8730e-ipc.yaml):
+ *   tx = bit 2  (NP_TO_AP ch2, TX shift 0)
+ *   rx = bit 21 (AP_TO_NP ch5, RX-full group shift 16 -> 16+5)
+ *
+ * The shared region is the same physical address named by the CA32 host
+ * (0x60700000, 64 KB, KM4_DRAM_HEAP_EXT). It sits above the KM4 application
+ * RAM sram0 (0x60000020..0x6015B000) so no dram shrink is needed here.
+ *
+ * Cache coherency: KM4 has a D-cache, so the vring region is marked
+ * ATTR_MPU_RAM_NOCACHE; mpu_configure_regions_from_dt() programs a
+ * non-cacheable MPU region for it at boot.  No CONFIG_OPENAMP_WITH_DCACHE.
+ */
+
+#include <zephyr/dt-bindings/memory-attr/memory-attr-arm.h>
+
+/ {
+	sram_ipc: memory@60700000 {
+		compatible = "zephyr,memory-region", "mmio-sram";
+		reg = <0x60700000 DT_SIZE_K(64)>;
+		zephyr,memory-region = "SRAM_IPC";
+		zephyr,memory-attr = <DT_MEM_ARM(ATTR_MPU_RAM_NOCACHE)>;
+	};
+
+	soc {
+		ipc_mbox: mbox@41000500 {
+			compatible = "realtek,rtl8730e-ipc";
+			reg = <0x41000500 0x14>;
+			interrupt-parent = <&nvic>;
+			interrupts = <24 3>;
+			#mbox-cells = <1>;
+			status = "okay";
+		};
+	};
+
+	ipc {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		ipc0: ipc0 {
+			compatible = "zephyr,ipc-openamp-static-vrings";
+			memory-region = <&sram_ipc>;
+			mboxes = <&ipc_mbox 2>, <&ipc_mbox 21>;
+			mbox-names = "tx", "rx";
+			role = "remote";
+			status = "okay";
+		};
+	};
+};

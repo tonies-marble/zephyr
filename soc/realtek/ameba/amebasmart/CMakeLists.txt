@@ -4,10 +4,13 @@
 zephyr_include_directories(.)
 
 # ---------------------------------------------------------------------------
-# Linker script and SoC sources: branch on CA32 (app) vs KM4 (MCUboot)
+# Linker script and SoC sources: branch per CPU cluster.
+#   CA32 (Cortex-A32) : SMP application domain, loaded by TF-A
+#   KM4  (Cortex-M55) : MCUboot bootloader image  OR  KM4 application (image2)
+#   KM0  (Cortex-M23) : low-power core application
 # ---------------------------------------------------------------------------
 
-if(CONFIG_MCUBOOT)
+if(CONFIG_SOC_RTL8730E_KM4 AND CONFIG_MCUBOOT)
   # KM4 Cortex-M55: MCUboot bootloader domain
   set(SOC_LINKER_SCRIPT ${CMAKE_CURRENT_LIST_DIR}/../common/linker_cortex_m.ld CACHE INTERNAL "")
 
@@ -16,6 +19,18 @@ if(CONFIG_MCUBOOT)
   zephyr_linker_sources(RAM_SECTIONS SORT_KEY 0x1 km4_msp_stack.ld)
 
   zephyr_sources(${CMAKE_CURRENT_LIST_DIR}/../common/mcuboot_action_hook.c)
+
+elseif(CONFIG_SOC_RTL8730E_KM4)
+  # KM4 Cortex-M55: Zephyr application (non-secure image2).
+  # NOTE (Phase 2): KM4 app linker + startup sources are added in km4/CMakeLists
+  #                 include below.
+  include(${CMAKE_CURRENT_LIST_DIR}/km4/CMakeLists.txt)
+
+elseif(CONFIG_SOC_RTL8730E_KM0)
+  # KM0 Cortex-M23: low-power core application.
+  # NOTE (Phase 3): KM0 linker + startup sources are added in km0/CMakeLists
+  #                 include below.
+  include(${CMAKE_CURRENT_LIST_DIR}/km0/CMakeLists.txt)
 
 else()
   # CA32 Cortex-A32: Zephyr application domain
@@ -108,6 +123,49 @@ if(BIN_FILES)
       )
     endif()
     include(${CMAKE_CURRENT_LIST_DIR}/../common/mcuboot_image.cmake)
+
+  elseif(CONFIG_SOC_RTL8730E_KM4)
+    # ---- KM4 (Cortex-M55) application image2 ----
+    # The KM4 app links as an XIP image (text/rodata in the KM4_IMG2_XIP flash
+    # window, data/bss copied to PSRAM at startup by Zephyr's own z_data_copy).
+    # merge_bin.py --core km4 wraps the whole zephyr.bin in the vendor image2
+    # header (single XIP sub-image at KM4_IMG2_XIP=0x0D000020) and emits a
+    # km4_image2_all.bin-format file, so it drops straight into the CA32
+    # fw_pack --image2 slot in place of the vendor km4_image2_all.bin blob.
+    # (Also emit .map/.asm debug artifacts.)
+    add_custom_target(raw.map ALL
+      DEPENDS ${ZEPHYR_BINARY_DIR}/${KERNEL_NAME}.raw.map
+    )
+    add_custom_command(
+      OUTPUT ${ZEPHYR_BINARY_DIR}/${KERNEL_NAME}.raw.map
+      COMMAND ${CMAKE_NM} ${ZEPHYR_BINARY_DIR}/${KERNEL_ELF_NAME} | sort > ${ZEPHYR_BINARY_DIR}/${KERNEL_NAME}.raw.map
+      COMMAND ${CMAKE_OBJDUMP} -d ${ZEPHYR_BINARY_DIR}/${KERNEL_ELF_NAME} > ${ZEPHYR_BINARY_DIR}/${KERNEL_NAME}.asm
+      COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/merge_bin.py ${PYTHON_SCRIPT_ARGS} --core km4
+      DEPENDS ${ZEPHYR_BINARY_DIR}/${KERNEL_ELF_NAME}
+              ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/${CONFIG_SOC_SERIES}/manifest.json5
+    )
+
+  elseif(CONFIG_SOC_RTL8730E_KM0)
+    # ---- KM0 (Cortex-M23) low-power core application image2 ----
+    # The KM0 app is built with CONFIG_XIP=n: the whole zephyr.bin is
+    # SRAM-resident and loaded verbatim to the KM0 SRAM entry
+    # (KM0_BD_RAM=0x23002020, == CONFIG_SRAM_BASE_ADDRESS) -- NOT the KM0 flash
+    # XIP window.  merge_bin.py --core km0 wraps the whole zephyr.bin in the
+    # vendor image2 header (single SRAM-load sub-image at 0x23002020) and emits a
+    # km0_image2_all.bin-format file, so it drops straight into the CA32
+    # fw_pack --image2 slot in place of the vendor km0_image2_all.bin blob.
+    # (Also emit .map/.asm debug artifacts.)
+    add_custom_target(raw.map ALL
+      DEPENDS ${ZEPHYR_BINARY_DIR}/${KERNEL_NAME}.raw.map
+    )
+    add_custom_command(
+      OUTPUT ${ZEPHYR_BINARY_DIR}/${KERNEL_NAME}.raw.map
+      COMMAND ${CMAKE_NM} ${ZEPHYR_BINARY_DIR}/${KERNEL_ELF_NAME} | sort > ${ZEPHYR_BINARY_DIR}/${KERNEL_NAME}.raw.map
+      COMMAND ${CMAKE_OBJDUMP} -d ${ZEPHYR_BINARY_DIR}/${KERNEL_ELF_NAME} > ${ZEPHYR_BINARY_DIR}/${KERNEL_NAME}.asm
+      COMMAND ${PYTHON_EXECUTABLE} ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/scripts/merge_bin.py ${PYTHON_SCRIPT_ARGS} --core km0
+      DEPENDS ${ZEPHYR_BINARY_DIR}/${KERNEL_ELF_NAME}
+              ${ZEPHYR_HAL_REALTEK_MODULE_DIR}/ameba/${CONFIG_SOC_SERIES}/manifest.json5
+    )
 
   elseif(CONFIG_BOOTLOADER_MCUBOOT)
     # ---- CA32 app build (MCUboot-aware, to be signed by imgtool) ----

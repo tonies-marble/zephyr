@@ -76,3 +76,18 @@ config SYS_CLOCK_HW_CYCLES_PER_SEC
 	default $(dt_node_int_prop_int,/clocks/clk_sys,clock-frequency)
 
 endif # SOC_RTL8730E_KM4
+
+if SOC_RTL8730E_KM0
+
+config CACHE_MANAGEMENT
+	default y
+
+config NUM_IRQS
+	# KM0 LP-core NVIC. Refined by the KM0 bring-up (see km0/).
+	default 64
+
+config SYS_CLOCK_HW_CYCLES_PER_SEC
+	# Derived from the /clocks/clk_sys DT node.
+	default $(dt_node_int_prop_int,/clocks/clk_sys,clock-frequency)
+
+endif # SOC_RTL8730E_KM0

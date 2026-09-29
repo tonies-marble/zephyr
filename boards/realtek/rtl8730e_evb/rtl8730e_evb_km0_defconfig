@@ -1,0 +1,23 @@
+# Copyright (c) 2026 Realtek Semiconductor Corp.
+# SPDX-License-Identifier: Apache-2.0
+
+# KM0 image2 is loaded into KM0_BD_RAM by the LP bootloader and runs from SRAM.
+CONFIG_XIP=n
+
+# Keep Zephyr cache management out of the initial KM0 bring-up. The KM0 RTK
+# cache does expose ARMv7-M-style SCB cache-maintenance registers (so the code
+# compiles - see the CM0 branch in the HAL cmsis_cpu.h), but leaving the cache
+# unmanaged avoids an untested runtime cache-enable path and the need for a
+# per-cluster CONFIG_DCACHE_LINE_SIZE. Overrides the CACHE_MANAGEMENT=y default
+# in the shared SoC Kconfig.defconfig for this cluster.
+# TODO: flip to =y (and set DCACHE_LINE_SIZE=32) once KM0 boot is validated.
+CONFIG_CACHE_MANAGEMENT=n
+
+# Small LP core: keep the C library and stacks minimal.
+CONFIG_MINIMAL_LIBC=y
+CONFIG_MAIN_STACK_SIZE=2048
+
+# Console over the shared LOGUART.
+CONFIG_SERIAL=y
+CONFIG_CONSOLE=y
+CONFIG_UART_CONSOLE=y
