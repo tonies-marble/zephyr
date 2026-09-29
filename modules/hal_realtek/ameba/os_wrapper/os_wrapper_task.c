@@ -98,7 +98,11 @@ int rtos_task_create(rtos_task_t *pp_handle, const char *p_name, void (*p_routin
 		return RTK_FAIL;
 	}
 
-	p_stack = (k_thread_stack_t *)k_malloc(K_KERNEL_STACK_LEN(stack_size_in_byte));
+	/* The initial stack pointer derives from this buffer and must be
+	 * 8-byte aligned (AAPCS); k_malloc only guarantees 4 on a small heap.
+	 */
+	p_stack = (k_thread_stack_t *)k_aligned_alloc(ARCH_STACK_PTR_ALIGN,
+						      K_KERNEL_STACK_LEN(stack_size_in_byte));
 	if (p_stack == NULL) {
 		k_free(p_thread);
 		LOG_ERR("Alloc stack fail for %s", p_name);
