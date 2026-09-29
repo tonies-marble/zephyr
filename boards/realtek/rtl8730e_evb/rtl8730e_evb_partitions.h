@@ -28,7 +28,10 @@
 /* Partition sizes */
 #define BOOT_SLOT_BASE    0x0
 #define BOOT_SLOT_SIZE    DT_SIZE_K(256)   /* 0x00040000 - holds MCUboot (~93 KB) */
-#define APP_SLOT_SIZE     DT_SIZE_K(1024)
+/* Matches the vendor OTA1 span (ameba_flashcfg.c: 0x08040000..0x08300000);
+ * the tri-core WiFi image set exceeds 1 MB.
+ */
+#define APP_SLOT_SIZE     DT_SIZE_K(2816)
 
 /* Partition offsets (calculated) */
 #define APP_SLOT0_OFFSET  (BOOT_SLOT_BASE   + BOOT_SLOT_SIZE)  /* 0x00040000 */

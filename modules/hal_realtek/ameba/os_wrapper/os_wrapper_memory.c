@@ -27,10 +27,15 @@ void rtos_mem_free(void *pbuf)
 	k_free(pbuf);
 }
 
+/* Allocations are shared across cores (WiFi skbs, IPC buffers) on the
+ * tri-core parts, so align to the largest cache line of any core.
+ */
+#define RTOS_MEM_ALIGN MAX(CACHE_LINE_SIZE, 64)
+
 void *rtos_mem_malloc(uint32_t size)
 {
 #if (CONFIG_HEAP_MEM_POOL_SIZE > 0)
-	return k_aligned_alloc(CACHE_LINE_SIZE, CACHE_LINE_ALIGNMENT(size));
+	return k_aligned_alloc(RTOS_MEM_ALIGN, ROUND_UP(size, RTOS_MEM_ALIGN));
 #else
 	LOG_ERR("%s <<< k_aligned_alloc not support. >>>", __func__);
 	return NULL;

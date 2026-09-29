@@ -7,6 +7,7 @@ zephyr_library_sources(
   os_wrapper_mutex.c
   os_wrapper_queue.c
   os_wrapper_semaphore.c
+  os_wrapper_static.c
   os_wrapper_task.c
   os_wrapper_time.c
   os_wrapper_critical.c
