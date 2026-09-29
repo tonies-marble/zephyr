@@ -75,6 +75,29 @@ config RTK_AP_IPV4_GATEWAY
 	help
 	  Gateway for SoftAP clients (usually the AP itself).
 
+config WIFI_AMEBA_FAST_CONNECT
+	bool "Wi-Fi fast reconnect (store last AP profile)"
+	default y
+	select SETTINGS
+	select NVS
+	select FLASH
+	select FLASH_MAP
+	# SETTINGS_BACKEND is a choice; it defaults to SETTINGS_NVS once NVS is
+	# enabled, so selecting NVS is enough to pick the backend.
+	help
+	  The WHC host firmware saves the last associated AP profile
+	  (SSID/passphrase/channel/security) and reloads it at boot to skip
+	  the scan/auth handshake on the next connect.  On this platform the
+	  vendor user config enables fast reconnect unconditionally, and the
+	  fast-connect code stores the profile through Zephyr's settings API
+	  (settings_save_one/settings_load_one).  This enables the settings
+	  subsystem with an NVS backend so those calls reach real storage
+	  instead of the WHC library's weak no-op stubs; the backend binds to
+	  the board's "storage" flash partition.  The Ameba Wi-Fi driver
+	  initializes the settings subsystem at STA start before the profile
+	  is loaded.  Turn this off to drop the settings/NVS/flash stack when
+	  fast reconnect is not wanted.
+
 config SINGLE_CORE_WIFI
 	bool
 	depends on SOC_SERIES_AMEBAD

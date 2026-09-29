@@ -35,7 +35,16 @@
 
 /* Partition offsets (calculated) */
 #define APP_SLOT0_OFFSET  (BOOT_SLOT_BASE   + BOOT_SLOT_SIZE)  /* 0x00040000 */
-#define APP_SLOT1_OFFSET  (APP_SLOT0_OFFSET + APP_SLOT_SIZE)   /* 0x00140000 */
-#define STORAGE_OFFSET    (APP_SLOT1_OFFSET + APP_SLOT_SIZE)   /* 0x00240000 */
+#define APP_SLOT1_OFFSET  (APP_SLOT0_OFFSET + APP_SLOT_SIZE)   /* 0x00300000 */
+
+/*
+ * Settings/NVS storage.  Pinned to the vendor VFS1 region
+ * (ameba_flashcfg.c Flash_Layout[]: 0x08640000, 512 KB) rather than computed
+ * after slot1: the slot1-relative value landed at 0x005C0000, inside the
+ * vendor IMG_APP_OTA2 update slot (0x08340000..0x085FFFFF), which NVS erases
+ * would clobber.  0x640000 clears both app OTA slots and the OTA2 image.
+ * The per-core flash node must be sized to reach this (>= 8 MB).
+ */
+#define STORAGE_OFFSET    0x640000
 
 #endif /* RTL8730E_EVB_PARTITIONS_H_ */

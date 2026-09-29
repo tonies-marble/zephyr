@@ -146,6 +146,42 @@ void xlat_flash_region_xip(void)
 #endif
 }
 
+#if !defined(CONFIG_XIP)
+/*
+ * FLASH_Write_Lock/Unlock override for the non-XIP amebasmart configuration.
+ *
+ * The vendor HAL versions (__weak, ameba_flash_ram.c) assume every core runs
+ * in place from the shared SPI flash, so before an erase/program they gate
+ * CA32 Core1 (SGI#2 + WFE) and hand off to KM4 over the FLASHPG IPC to halt
+ * their instruction fetches, then remap the flash region non-cacheable.
+ *
+ * This port builds all three cores with CONFIG_XIP=n: the bootloader copies
+ * each image into RAM (CA32/KM4 PSRAM, KM0 SRAM) and the flash aperture is
+ * mapped read-only, non-executable (see mmu_regions.c REGION_FLASH).  No core
+ * fetches instructions from flash at run time, so the cross-core gate is not
+ * only unnecessary but unsafe: vPortGateOtherCore() busy-waits for Core1 to
+ * enter STANDBYWFE via SGI#2, which deadlocks whenever Core1 is not able to
+ * take that IPI at the moment of a flash write (e.g. the first NVS erase during
+ * settings init).  Only the CA32 flash driver touches the SPIC, and the Zephyr
+ * flash API already serialises callers, so a local interrupt lock is all that
+ * is needed to keep a single SPIC erase/program transaction atomic.
+ *
+ * These strong definitions replace the __weak HAL ones at link time.  If XIP is
+ * ever enabled, this block drops out and the vendor cross-core path is used.
+ */
+static unsigned int flash_write_lock_key;
+
+void FLASH_Write_Lock(void)
+{
+	flash_write_lock_key = irq_lock();
+}
+
+void FLASH_Write_Unlock(void)
+{
+	irq_unlock(flash_write_lock_key);
+}
+#endif /* !CONFIG_XIP */
+
 void relocate_vector_table(void)
 {
 	__set_VBAR(VECTOR_ADDRESS & ~0x1f);

@@ -20,6 +20,9 @@
 #include <zephyr/net/wifi_nm.h>
 #include <zephyr/net/conn_mgr/connectivity_wifi_mgmt.h>
 #include <zephyr/logging/log.h>
+#ifdef CONFIG_WIFI_AMEBA_FAST_CONNECT
+#include <zephyr/settings/settings.h>
+#endif
 LOG_MODULE_REGISTER(ameba_wifi, CONFIG_WIFI_LOG_LEVEL);
 /* use global iface pointer to support any ethernet driver */
 /* necessary for wifi callback functions */
@@ -578,6 +581,20 @@ static void ameba_wifi_init(struct net_if *iface)
 	dev_data->if_idx = if_init_idx;
 
 	if (if_init_idx == STA_WLAN_INDEX) {
+#ifdef CONFIG_WIFI_AMEBA_FAST_CONNECT
+		/*
+		 * Register the settings NVS backend before the WHC firmware
+		 * loads the stored fast-reconnect profile during wifi_init().
+		 * Without this the profile save/load would hit the WHC
+		 * library's weak no-op stubs.  Idempotent across both ifaces.
+		 */
+		int err = settings_subsys_init();
+
+		if (err) {
+			LOG_ERR("settings_subsys_init failed (%d); fast reconnect disabled",
+				err);
+		}
+#endif
 		wlan_int_enable();
 		wifi_init();
 

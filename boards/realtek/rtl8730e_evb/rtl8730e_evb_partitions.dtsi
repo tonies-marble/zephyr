@@ -40,8 +40,8 @@ partitions {
 		reg = <APP_SLOT1_OFFSET APP_SLOT_SIZE>;
 	};
 
-	/* VFS storage — after slot1 */
-	storage_partition: partition@240000 {
+	/* Settings/NVS storage — vendor VFS1 region (0x640000, see partitions.h) */
+	storage_partition: partition@640000 {
 		label = "storage";
 		reg = <STORAGE_OFFSET DT_SIZE_K(128)>;
 	};

@@ -99,7 +99,7 @@
 
 			flash0: flash@e000020 {
 				/* KM4's RSIP XIP logic window (KM4_IMG2_XIP). */
-				reg = <0x0d000020 DT_SIZE_M(6)>;
+				reg = <0x0d000020 DT_SIZE_M(8)>;
 #include "rtl8730e_evb_partitions.dtsi"
 			};
 		};
