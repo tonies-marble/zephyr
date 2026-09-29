@@ -9,3 +9,35 @@ config UART_AMEBA_LOGUART
 	select SERIAL_SUPPORT_INTERRUPT
 	help
 	  This option enables the LOGUART driver for Realtek Ameba SoCs.
+
+config UART_AMEBA_LOGUART_XCORE_LOCK
+	bool "Serialize LOGUART output across cores"
+	depends on UART_AMEBA_LOGUART
+	help
+	  The RTL8730E LOGUART multiplexes a private per-core TX path from each
+	  of CA32, KM4 and KM0 into one serial line at byte granularity, so
+	  console output from cores running concurrently interleaves mid-line.
+	  Enable this to buffer a line per core and flush it while holding a
+	  core-to-core hardware semaphore, so each line reaches the wire intact.
+	  Only useful when more than one core runs this driver (the tri-core
+	  Zephyr build); leave it off for single-core images.
+
+if UART_AMEBA_LOGUART_XCORE_LOCK
+
+config UART_AMEBA_LOGUART_XCORE_LINE_MAX
+	int "Per-core console line buffer size"
+	default 128
+	help
+	  Bytes buffered per core before a flush.  A line longer than this is
+	  flushed in chunks whose boundaries may interleave with other cores.
+
+config UART_AMEBA_LOGUART_XCORE_SEM_ID
+	int "Core-to-core hardware semaphore index"
+	range 7 15
+	default 15
+	help
+	  IPC hardware semaphore reserved for the console line flush.  IDs 0-6
+	  are claimed by the vendor firmware (IMQ/FLASH/OTP/CRYPTO/DIAGNOSE/
+	  SYSON/GDMA); pick a free one in 7-15.
+
+endif # UART_AMEBA_LOGUART_XCORE_LOCK

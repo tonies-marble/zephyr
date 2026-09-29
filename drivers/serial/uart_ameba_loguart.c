@@ -16,6 +16,7 @@
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/drivers/pinctrl.h>
 #include <zephyr/irq.h>
+#include <zephyr/spinlock.h>
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(loguart_ameba, CONFIG_UART_LOG_LEVEL);
@@ -66,6 +67,91 @@ static int loguart_ameba_poll_in(const struct device *dev, unsigned char *c)
 	return 0;
 }
 
+#ifdef CONFIG_UART_AMEBA_LOGUART_XCORE_LOCK
+/*
+ * Cross-core output serialization.
+ *
+ * The LOGUART gives each core (the CA32 SMP pair, KM4 and KM0) a private TX
+ * path that the hardware multiplexes into one serial line at byte
+ * granularity, so unsynchronized output interleaves mid-line.  Accumulate a
+ * line per core and flush it while holding a core-to-core hardware semaphore
+ * so each line reaches the wire intact.
+ *
+ * The shell's interactive echo shares this path (blocking-mode TX also uses
+ * poll_out), so a held partial line must not wait for a newline that a human
+ * has not typed yet.  A one-shot timer flushes any buffered partial a few
+ * milliseconds after the last character: log bursts arrive with sub-
+ * millisecond spacing and flush whole on their trailing newline before the
+ * timer fires, while keystrokes/backspaces/prompts appear promptly.
+ */
+#define LOGUART_XCORE_LINE_MAX	CONFIG_UART_AMEBA_LOGUART_XCORE_LINE_MAX
+#define LOGUART_XCORE_SEM_ID	CONFIG_UART_AMEBA_LOGUART_XCORE_SEM_ID
+/* Register reads before flushing anyway; caps the stall if a peer died holding it. */
+#define LOGUART_XCORE_SEM_RETRIES	200000U
+/* A partial line with no newline is flushed this long after the last byte. */
+#define LOGUART_XCORE_IDLE_MS	4
+
+static struct k_spinlock loguart_xcore_lock;
+static char loguart_xcore_line[LOGUART_XCORE_LINE_MAX];
+static size_t loguart_xcore_len;
+
+/* Caller holds loguart_xcore_lock. */
+static void loguart_xcore_flush(void)
+{
+	bool locked = IPC_SEMTake(LOGUART_XCORE_SEM_ID, LOGUART_XCORE_SEM_RETRIES) == TRUE;
+
+	for (size_t i = 0; i < loguart_xcore_len; i++) {
+		LOGUART_PutChar(loguart_xcore_line[i]);
+	}
+	loguart_xcore_len = 0;
+
+	if (locked) {
+		IPC_SEMFree(LOGUART_XCORE_SEM_ID);
+	}
+}
+
+static void loguart_xcore_timeout(struct k_timer *timer)
+{
+	ARG_UNUSED(timer);
+	k_spinlock_key_t key = k_spin_lock(&loguart_xcore_lock);
+
+	if (loguart_xcore_len > 0) {
+		loguart_xcore_flush();
+	}
+
+	k_spin_unlock(&loguart_xcore_lock, key);
+}
+K_TIMER_DEFINE(loguart_xcore_timer, loguart_xcore_timeout, NULL);
+
+static void loguart_xcore_putc(unsigned char c)
+{
+	bool flushed, was_empty;
+	k_spinlock_key_t key = k_spin_lock(&loguart_xcore_lock);
+
+	was_empty = (loguart_xcore_len == 0);
+	loguart_xcore_line[loguart_xcore_len++] = c;
+	flushed = (c == '\n' || loguart_xcore_len == LOGUART_XCORE_LINE_MAX);
+	if (flushed) {
+		loguart_xcore_flush();
+	}
+
+	k_spin_unlock(&loguart_xcore_lock, key);
+
+	/*
+	 * Arm/cancel the idle-flush timer outside the spinlock (k_timer takes its
+	 * own locks).  The timer subsystem is not up during early boot, but that
+	 * output is newline-terminated and flushes above without it.
+	 */
+	if (!k_is_pre_kernel()) {
+		if (flushed) {
+			k_timer_stop(&loguart_xcore_timer);
+		} else if (was_empty) {
+			k_timer_start(&loguart_xcore_timer, K_MSEC(LOGUART_XCORE_IDLE_MS), K_NO_WAIT);
+		}
+	}
+}
+#endif /* CONFIG_UART_AMEBA_LOGUART_XCORE_LOCK */
+
 /**
  * @brief Output a character in polled mode.
  *
@@ -75,7 +161,11 @@ static int loguart_ameba_poll_in(const struct device *dev, unsigned char *c)
 static void loguart_ameba_poll_out(const struct device *dev, unsigned char c)
 {
 	ARG_UNUSED(dev);
+#ifdef CONFIG_UART_AMEBA_LOGUART_XCORE_LOCK
+	loguart_xcore_putc(c);
+#else
 	LOGUART_PutChar(c);
+#endif
 }
 
 #ifdef CONFIG_UART_INTERRUPT_DRIVEN
@@ -85,6 +175,15 @@ static int loguart_ameba_fifo_fill(const struct device *dev, const uint8_t *tx_d
 	ARG_UNUSED(dev);
 
 	uint8_t num_tx = 0U;
+
+#ifdef CONFIG_UART_AMEBA_LOGUART_XCORE_LOCK
+	/* Buffer through the cross-core line shim (its own lock is held per char). */
+	while (len - num_tx > 0) {
+		loguart_xcore_putc((uint8_t)tx_data[num_tx++]);
+	}
+
+	return num_tx;
+#else
 	unsigned int key;
 
 	if (!LOGUART_Writable()) {
@@ -102,6 +201,7 @@ static int loguart_ameba_fifo_fill(const struct device *dev, const uint8_t *tx_d
 	irq_unlock(key);
 
 	return num_tx;
+#endif
 }
 
 static int loguart_ameba_fifo_read(const struct device *dev, uint8_t *rx_data, const int size)
